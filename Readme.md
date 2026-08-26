@@ -4,6 +4,12 @@
 
 > 本项目会直接控制源表输出。首次连接样品前，请先使用限流、低电压和空载条件验证接线、量程、端子与紧急停止流程。
 
+## 最简单的使用方法
+
+在 GitHub 页面点击绿色 **Code** 按钮，再点击 **Download ZIP**。解压完整压缩包后，双击根目录的 `K2450电学测试系统.exe` 即可启动，不需要安装 Python，也不需要创建虚拟环境。
+
+请保留 `runtime` 文件夹并让它与 EXE 位于同一目录；EXE 会调用其中的 Python 运行环境和第三方库。`configs` 是可查看、可编辑的配置文件，`source` 是完整 Python 源码。
+
 ## 主要功能
 
 - 九种测量模块统一入口，支持单台或双台 Keithley 2450
@@ -28,7 +34,7 @@
 
 程序会通过 `*IDN?` 检查仪器，当前仅接受 Keithley 2450。双表测试需要两台地址不同的 2450。
 
-## 安装与启动
+## 从源码运行
 
 ### 1. 获取代码
 
@@ -48,10 +54,10 @@ python -m pip install --upgrade pip
 ### 3. 安装依赖
 
 ```powershell
-pip install -r requirements.txt
+pip install -r source/requirements.txt
 ```
 
-主要 Python 依赖包括 PyQt6、PyQtGraph、PyVISA、NumPy、SciPy、Matplotlib 和 Markdown，具体最低版本以 `requirements.txt` 为准。
+主要 Python 依赖包括 PyQt6、PyQtGraph、PyVISA、NumPy、SciPy、Matplotlib 和 Markdown，具体最低版本以 `source/requirements.txt` 为准。
 
 ### 4. 检查 VISA 连接
 
@@ -66,7 +72,7 @@ python -c "import pyvisa; print(pyvisa.ResourceManager().list_resources())"
 ### 5. 启动
 
 ```powershell
-python main.py
+python source/main.py
 ```
 
 ## 第一次测量
@@ -172,7 +178,7 @@ Keithley 2450 不具备专用 digitize 功能。采样速度和噪声取决于 N
 - `configs/5T.json`
 - `configs/9T.json`
 
-这些文件中的 VISA 地址和 Windows 数据目录只是已有实验环境的示例。换电脑、换接线或换仪器地址后，必须先在界面中重新扫描和确认，不能直接照搬。
+这些文件保留实验参数和 VISA 地址，但不包含特定电脑的绝对数据目录。换电脑、换接线或换仪器地址后，必须先在界面中重新扫描和确认，不能直接照搬。
 
 绘图界面中的“设为默认”会在本机生成 `configs/plotting_default.json`，供以后启动时自动加载。
 
@@ -192,37 +198,40 @@ Keithley 2450 不具备专用 digitize 功能。采样速度和噪声取决于 N
 
 ```text
 K2450-electrical-test-system/
-├── main.py                    # 主窗口、导航、配置和绘图入口
-├── requirements.txt           # Python 依赖
-├── configs/                   # 默认、5T 和 9T 配置
-├── core/
-│   ├── app_base.py            # 测量模块公共状态和结果管理
-│   ├── hardware_base.py       # 2450 校验、归零、元数据和文件安全
-│   ├── plotting.py            # 绘图设置、渲染、预览与结果分发
-│   ├── ui_builder.py          # 通用界面组件
-│   └── utils.py               # 公共工具
-├── modules/                   # 九个测量模块
-│   ├── break_junction.py
-│   ├── iv_curve.py
-│   ├── isd_vg_setvsd.py
-│   ├── mapping_scan.py
-│   ├── it_step_setgate.py
-│   ├── bias_switch.py
-│   ├── gate_switch.py
-│   ├── arbitrary_bias.py
-│   └── arbitrary_gate.py
-└── tests/
-    ├── test_reliability.py    # 硬件安全、保存和配置测试
-    └── test_plotting.py       # 绘图配置与渲染测试
+├── K2450电学测试系统.exe       # 普通用户双击这里
+├── runtime/                    # EXE 需要的运行环境和依赖，不要删除
+├── configs/                    # 平铺的默认、5T 和 9T 配置
+├── source/                     # 完整可编辑源码
+│   ├── main.py                 # 主窗口、导航、配置和绘图入口
+│   ├── requirements.txt        # Python 运行依赖
+│   ├── core/                   # 公共逻辑、硬件安全与绘图
+│   ├── modules/                # 九个测量模块
+│   ├── tests/                  # 自动化测试
+│   └── packaging/              # Windows 打包脚本
+└── Readme.md
 ```
+
+这个结构让普通用户下载整个仓库后直接运行，也让开发者在同一份仓库里查看和修改 Python 源码。更新程序时，EXE 与 `runtime` 必须作为一套一起更新。
 
 ## 运行测试
 
 测试使用模拟仪器与临时文件，不需要连接真实 2450：
 
 ```powershell
-python -m unittest discover -s tests -v
+python -m unittest discover -s source/tests -t source -v
 ```
+
+## 重新生成 Windows 版本
+
+开发电脑先安装源码依赖和 PyInstaller，然后从仓库根目录运行：
+
+```powershell
+python -m pip install -r source/requirements.txt
+python -m pip install pyinstaller
+powershell -ExecutionPolicy Bypass -File source/packaging/build_windows.ps1
+```
+
+脚本会先运行测试，再将最新的 `K2450电学测试系统.exe` 和 `runtime` 更新到仓库根目录。提交并推送这两项后，GitHub 的 **Download ZIP** 就会同时包含最新源码和最新可运行程序。
 
 ## 常见问题
 

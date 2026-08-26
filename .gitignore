@@ -2,6 +2,10 @@
 __pycache__/
 *.py[cod]
 *$py.class
+
+# PyInstaller uses compiled Python extension modules inside runtime.
+!runtime/*.pyd
+!runtime/**/*.pyd
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -10,8 +14,10 @@ htmlcov/
 
 # Virtual environments and packaging output
 .venv/
+.build-venv/
 venv/
 env/
+.build/
 build/
 dist/
 *.egg-info/

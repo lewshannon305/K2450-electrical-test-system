@@ -17,8 +17,8 @@
         "max_step_mV": "40.000",
         "min_feedback_voltage": "0.050",
         "delta_percent": "1.0",
-        "folder": "C:\\lxr\\data\\202603\\Au_test\\Break",
-        "__folder__": "C:\\lxr\\data\\202603\\Au_test\\Break"
+        "folder": "",
+        "__folder__": ""
     },
     "iv_curve": {
           "address": "GPIB0::1::INSTR",
@@ -54,7 +54,7 @@
             "gate_ramp_step": 0.1, "gate_step_delay": 0.5,
             "gate_settle": 20.0, "gate_group_wait": 0.0
         },
-        "__folder__": "C:\\lxr\\data\\202603\\Au_test\\IV"
+        "__folder__": ""
     },
     "isd_vg_setvsd": {
         "Bias_target": "0.002",
@@ -69,7 +69,7 @@
         "Gate_VOLT_RANGE": "20.0",
         "Ig_THRESHOLD": "1e-9",
         "SETTLE_TIME": "0.1",
-        "__folder__": "C:\\lxr\\data\\202603\\Au_test\\Isd_Vg_setVsd"
+        "__folder__": ""
     },
     "mapping_scan": {
         "bias_addr": "GPIB0::1::INSTR",
@@ -94,7 +94,7 @@
         "gate_settle": "20",
         "bias_settle": "0",
         "prefix": "Mapping",
-        "__folder__": "C:\\lxr\\data\\202603\\Au_test\\Mapping"
+        "__folder__": ""
     },
     "it_step_setgate": {
         "bias_address": "GPIB0::1::INSTR",
@@ -153,7 +153,7 @@
             "rb_b_single": true,
             "rb_b_step": false
         },
-        "__folder__": "C:\\lxr\\data\\202603\\Au_test\\It"
+        "__folder__": ""
     },
     "bias_switch": {
         "bias_address": "GPIB0::1::INSTR",
@@ -180,7 +180,7 @@
         "prefix": "Switch1",
         "__cb_gate__": false,
         "__controls__": {"cb_gate": false, "cb_plot": true},
-        "__folder__": "C:\\lxr\\data\\202603\\Au_test\\Bias_Switch"
+        "__folder__": ""
     },
     "gate_switch": {
         "bias_address": "GPIB0::1::INSTR",
@@ -204,7 +204,7 @@
         "b_ilimit": "1.05e-5",
         "b_settle": "5.0",
         "prefix": "GateSW",
-        "__folder__": "C:\\lxr\\data\\202603\\Au_test\\Gate_Switch"
+        "__folder__": ""
     },
     "arbitrary_bias": {
         "bias_address": "GPIB0::1::INSTR",
@@ -228,7 +228,7 @@
         "__cb_gate__": false,
         "__controls__": {"cb_gate": false},
         "__waveform__": [[0.05, 2.0], [0.1, 2.0], [0.05, 2.0], [-0.1, 2.0]],
-        "__folder__": "C:\\lxr\\data\\202603\\Au_test\\Arb"
+        "__folder__": ""
     },
     "arbitrary_gate": {
         "bias_address": "GPIB0::1::INSTR",
@@ -251,7 +251,7 @@
         "b_ilimit": "0.1",
         "filename": "arb_gate_test.txt",
         "__waveform__": [[0.05, 2.0], [0.1, 2.0], [0.05, 2.0], [-0.1, 2.0]],
-        "__folder__": "C:\\lxr\\data\\202603\\Au_test\\Arb_Gate"
+        "__folder__": ""
     }
     }
 }
