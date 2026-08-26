@@ -1,0 +1,7 @@
+PyQt6>=6.4.0
+pyqtgraph>=0.13.0
+pyvisa>=1.12.0
+numpy>=1.24.0
+scipy>=1.10.0
+matplotlib>=3.7.0
+markdown>=3.4.0
