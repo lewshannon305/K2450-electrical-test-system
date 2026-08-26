@@ -26,4 +26,4 @@ Thumbs.db
 *.log
 results/
 plots/
-
+configs/plotting_default.json
