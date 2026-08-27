@@ -54,6 +54,16 @@ from core.hardware_base import (
     write_result_metadata,
 )
 from core.instrument_config import InstrumentSettings
+from core.time_acquisition import (
+    ACQUISITION_REALTIME,
+    ACQUISITION_TRIGGERED,
+    GATE_MONITOR_NPLC,
+    RealtimeSampler,
+    create_sampling_settings,
+    estimate_2450_rate,
+    selected_acquisition_mode,
+    timing_metadata,
+)
 from core.utils import (
     NoScrollComboBox,
     _0, _1, _2, _3, _4, _5, _6, _7, _8,
@@ -348,7 +358,7 @@ class ItMeasurement:
 
     def setup(self):
         try:
-            validate_nplc(self.params['b_nplc'], '偏压NPLC')
+            validate_nplc(self.params['sample_nplc'], '测量NPLC')
             validate_terminal(self.params['bias_terminal'], '偏压端子')
             validate_positive_step(self.params['b_ramp_step'], '偏压爬坡步长')
             if self.params['b_mode'] == 'single':
@@ -363,7 +373,6 @@ class ItMeasurement:
                 self.params['b_range'], self.params['b_ilimit'], '偏压'
             )
             if self.params['gate_enabled']:
-                validate_nplc(self.params['g_nplc'], '栅压NPLC')
                 validate_terminal(self.params['gate_terminal'], '栅压端子')
                 validate_positive_step(self.params['g_ramp_step'], '栅压爬坡步长')
                 if self.params['g_mode'] == 'single':
@@ -389,7 +398,7 @@ class ItMeasurement:
             # Constant-bias It does not need a source readback on every point.
             # Disabling it is essential for the 2450 internal-buffer rate.
             k_b.write(':SOUR:VOLT:READ:BACK OFF')
-            k_b.write(f":SENS:CURR:NPLC {self.params['b_nplc']}")
+            k_b.write(f":SENS:CURR:NPLC {self.params['sample_nplc']}")
             r_val = self.params['b_range']
             if str(r_val).upper() == 'AUTO':
                 k_b.write(':SENS:CURR:RANG:AUTO ON')
@@ -410,8 +419,8 @@ class ItMeasurement:
                 k_g.write(f":ROUT:TERM {self.params['gate_terminal']}")
                 k_g.write(':SENS:CURR:AZER OFF')
                 k_g.write(':SENS:CURR:AVER OFF')
-                k_g.write(':SOUR:VOLT:READ:BACK ON')
-                k_g.write(f":SENS:CURR:NPLC {self.params['g_nplc']}")
+                k_g.write(':SOUR:VOLT:READ:BACK OFF')
+                k_g.write(f":SENS:CURR:NPLC {GATE_MONITOR_NPLC}")
                 k_g.write(':SENS:CURR:RANG:AUTO ON')
                 k_g.write(f":SOUR:VOLT:ILIM {self.params['g_ilimit']}")
                 k_g.write(':SOUR:VOLT 0')
@@ -420,7 +429,7 @@ class ItMeasurement:
                 return
             verify_current_configuration(
                 k_b,
-                nplc=self.params['b_nplc'],
+                nplc=self.params['sample_nplc'],
                 current_range=self.params['b_range'],
                 current_limit=self.params['b_ilimit'],
                 terminal=self.params['bias_terminal'],
@@ -430,7 +439,7 @@ class ItMeasurement:
             if self.params['gate_enabled']:
                 verify_current_configuration(
                     k_g,
-                    nplc=self.params['g_nplc'],
+                    nplc=GATE_MONITOR_NPLC,
                     current_range='AUTO',
                     current_limit=self.params['g_ilimit'],
                     terminal=self.params['gate_terminal'],
@@ -519,9 +528,7 @@ class ItMeasurement:
 
     @staticmethod
     def _estimate_rate(nplc):
-        # Empirical 2450 timing with source readback disabled on a 50 Hz grid.
-        # The small fixed term accounts for conversion and trigger overhead.
-        return 1.0 / (float(nplc) / 50.0 + 0.00028)
+        return estimate_2450_rate(nplc)
 
     def _prepare_fast_buffer(self):
         if self._buffer_created:
@@ -533,7 +540,7 @@ class ItMeasurement:
             expected_points = int(self.params['num_points'])
         else:
             expected_points = int(
-                np.ceil(self.params['duration'] * self._estimate_rate(self.params['b_nplc']) * 1.20)
+                np.ceil(self.params['duration'] * self._estimate_rate(self.params['sample_nplc']) * 1.20)
             ) + 100
 
         if expected_points > MAX_BUFFER_POINTS:
@@ -552,7 +559,7 @@ class ItMeasurement:
                 f':TRIG:LOAD "SimpleLoop", {int(self.params["num_points"])}, 0, "{self._buffer_name}"'
             )
             expected_duration = (
-                int(self.params['num_points']) / self._estimate_rate(self.params['b_nplc'])
+                int(self.params['num_points']) / self._estimate_rate(self.params['sample_nplc'])
             )
         else:
             self.bias_keithley.write(
@@ -684,8 +691,76 @@ class ItMeasurement:
                 f'安全归零失败，已执行紧急关断：{exc}',
             ))
 
-    def _measure_it(self, vg, vb):
+    def _measure_it_realtime(self, vg, vb):
         self._single_autozero()
+        sampler = RealtimeSampler(
+            self.bias_keithley,
+            self.gate_keithley if self.params['gate_enabled'] else None,
+            self.params['gate_monitor_interval'],
+            lambda current: self.update_queue.put(('gate_leakage', current)),
+        )
+        times, currents = [], []
+        batch_t, batch_i = [], []
+        target_points = int(self.params['num_points'])
+        duration = float(self.params['duration'])
+        batch_size = max(1, int(self.params['plot_interval']))
+        self.update_queue.put(('stage', '电脑实时采样'))
+        try:
+            while True:
+                if self.stop_event.is_set() or self.force_stop_event.is_set():
+                    break
+                if self.params['meas_mode'] == 'points' and len(times) >= target_points:
+                    break
+                if self.params['meas_mode'] == 'time' and times and times[-1] >= duration:
+                    break
+                rel_time, current = sampler.sample('It实时偏压电流读数')
+                times.append(rel_time)
+                currents.append(current)
+                batch_t.append(rel_time)
+                batch_i.append(current)
+                if len(batch_t) >= batch_size:
+                    self.update_queue.put((
+                        'data_batch', vg, vb, batch_t, batch_i, batch_i.copy()
+                    ))
+                    batch_t, batch_i = [], []
+        except Exception as exc:
+            raise PartialItAcquisitionError(exc, times, currents) from exc
+        if batch_t:
+            self.update_queue.put((
+                'data_batch', vg, vb, batch_t, batch_i, batch_i.copy()
+            ))
+
+        t = np.asarray(times, dtype=float)
+        raw = np.asarray(currents, dtype=float)
+        if self.params['line_filter_mode'] == 'harmonic_fit':
+            filtered, filter_meta = _fit_line_harmonics(
+                t, raw,
+                nominal_freq=self.params['line_frequency'],
+                search_hz=self.params['line_search_hz'],
+                max_harmonic=self.params['max_odd_harmonic'],
+            )
+        else:
+            filtered = raw.copy()
+            filter_meta = {
+                'enabled': False,
+                'reason': '用户关闭工频处理',
+                'raw_std_A': float(np.std(raw)) if raw.size else 0.0,
+                'filtered_std_A': float(np.std(raw)) if raw.size else 0.0,
+            }
+        filter_meta.update(timing_metadata(t))
+        filter_meta.update({
+            'acquisition_engine': 'computer_realtime_polling',
+            'acquisition_mode': ACQUISITION_REALTIME,
+            'nplc': float(self.params['sample_nplc']),
+            'source_readback': False,
+            'autozero_mode': 'block_once',
+            'aborted': bool(self.stop_event.is_set() or self.force_stop_event.is_set()),
+        })
+        return t, raw, filtered, filter_meta
+
+    def _measure_it_triggered(self, vg, vb):
+        self._single_autozero()
+        self.update_queue.put(('gate_leakage_unavailable', None))
         expected_duration = self._prepare_fast_buffer()
         self.update_queue.put((
             'stage',
@@ -758,8 +833,10 @@ class ItMeasurement:
             float((len(times) - 1) / (times[-1] - times[0]))
             if len(times) > 1 and times[-1] > times[0] else 0.0
         )
+        filter_meta.update(timing_metadata(times))
         filter_meta['acquisition_engine'] = 'keithley_2450_internal_trigger_buffer'
-        filter_meta['nplc'] = float(self.params['b_nplc'])
+        filter_meta['acquisition_mode'] = ACQUISITION_TRIGGERED
+        filter_meta['nplc'] = float(self.params['sample_nplc'])
         filter_meta['configured_current_range_A'] = self.params['b_range']
         filter_meta['source_readback'] = False
         filter_meta['autozero_mode'] = self.params['autozero_mode']
@@ -791,6 +868,11 @@ class ItMeasurement:
                 filtered_currents[index:end].tolist(),
             ))
         return times, raw_currents, filtered_currents, filter_meta
+
+    def _measure_it(self, vg, vb):
+        if self.params['acquisition_mode'] == ACQUISITION_REALTIME:
+            return self._measure_it_realtime(vg, vb)
+        return self._measure_it_triggered(vg, vb)
 
     def run(self):
         try:
@@ -1081,6 +1163,12 @@ class ItStepWidget(BaseAppWidget):
         box_vbox.setContentsMargins(0, 0, 0, 0)
         self.inputs = {}
 
+        sampling_box = create_sampling_settings(
+            self, self.inputs, self.ui_font, self.bold_font,
+            gate_available=False,
+        )
+        box_vbox.addWidget(sampling_box)
+
         meas_box = QGroupBox('测量设置')
         meas_box.setFont(self.bold_font)
         meas_grid = QGridLayout(meas_box)
@@ -1114,72 +1202,47 @@ class ItStepWidget(BaseAppWidget):
         self.inputs['duration'].setStyleSheet('font-weight: normal;')
         meas_grid.addWidget(self.inputs['duration'], 1, 3)
 
-        self.cb_plot = QCheckBox('采集完成后绘图（采集中不访问仪表，保证连续高速采样）')
-        self.cb_plot.setFont(self.ui_font)
-        self.cb_plot.setStyleSheet('font-weight: normal;')
-        self.cb_plot.setChecked(True)
-        meas_grid.addWidget(self.cb_plot, 2, 0, 1, 4)
-
-        lbl_int = QLabel('缓冲读取/绘图批大小（点）:')
-        lbl_int.setFont(self.ui_font)
-        lbl_int.setStyleSheet('font-weight: normal;')
-        meas_grid.addWidget(lbl_int, 3, 0)
-        self.inputs['plot_interval'] = QLineEdit('1000')
-        self.inputs['plot_interval'].setFont(self.ui_font)
-        self.inputs['plot_interval'].setStyleSheet('font-weight: normal;')
-        meas_grid.addWidget(self.inputs['plot_interval'], 3, 1, 1, 3)
-
-        lbl_az = QLabel('自动调零:')
-        lbl_az.setFont(self.ui_font)
-        lbl_az.setStyleSheet('font-weight: normal;')
-        meas_grid.addWidget(lbl_az, 4, 0)
-        self.inputs['autozero_mode'] = NoScrollComboBox()
-        self.inputs['autozero_mode'].addItems(['block_once', 'off'])
-        self.inputs['autozero_mode'].setFont(self.ui_font)
-        self.inputs['autozero_mode'].setStyleSheet('font-weight: normal;')
-        meas_grid.addWidget(self.inputs['autozero_mode'], 4, 1)
-
         lbl_filter = QLabel('工频处理:')
         lbl_filter.setFont(self.ui_font)
         lbl_filter.setStyleSheet('font-weight: normal;')
-        meas_grid.addWidget(lbl_filter, 4, 2)
+        meas_grid.addWidget(lbl_filter, 2, 0)
         self.inputs['line_filter_mode'] = NoScrollComboBox()
         self.inputs['line_filter_mode'].addItems(['off', 'harmonic_fit'])
         self.inputs['line_filter_mode'].setFont(self.ui_font)
         self.inputs['line_filter_mode'].setStyleSheet('font-weight: normal;')
-        meas_grid.addWidget(self.inputs['line_filter_mode'], 4, 3)
+        meas_grid.addWidget(self.inputs['line_filter_mode'], 2, 1)
 
         lbl_line = QLabel('工频中心 (Hz):')
         lbl_line.setFont(self.ui_font)
         lbl_line.setStyleSheet('font-weight: normal;')
-        meas_grid.addWidget(lbl_line, 5, 0)
+        meas_grid.addWidget(lbl_line, 3, 0)
         self.inputs['line_frequency'] = QLineEdit('50.0')
         self.inputs['line_frequency'].setFont(self.ui_font)
         self.inputs['line_frequency'].setStyleSheet('font-weight: normal;')
-        meas_grid.addWidget(self.inputs['line_frequency'], 5, 1)
+        meas_grid.addWidget(self.inputs['line_frequency'], 3, 1)
 
         lbl_search = QLabel('频率搜索 ±Hz:')
         lbl_search.setFont(self.ui_font)
         lbl_search.setStyleSheet('font-weight: normal;')
-        meas_grid.addWidget(lbl_search, 5, 2)
+        meas_grid.addWidget(lbl_search, 3, 2)
         self.inputs['line_search_hz'] = QLineEdit('0.5')
         self.inputs['line_search_hz'].setFont(self.ui_font)
         self.inputs['line_search_hz'].setStyleSheet('font-weight: normal;')
-        meas_grid.addWidget(self.inputs['line_search_hz'], 5, 3)
+        meas_grid.addWidget(self.inputs['line_search_hz'], 3, 3)
 
         lbl_harmonic = QLabel('最高奇次谐波:')
         lbl_harmonic.setFont(self.ui_font)
         lbl_harmonic.setStyleSheet('font-weight: normal;')
-        meas_grid.addWidget(lbl_harmonic, 6, 0)
+        meas_grid.addWidget(lbl_harmonic, 4, 0)
         self.inputs['max_odd_harmonic'] = QLineEdit('5')
         self.inputs['max_odd_harmonic'].setFont(self.ui_font)
         self.inputs['max_odd_harmonic'].setStyleSheet('font-weight: normal;')
-        meas_grid.addWidget(self.inputs['max_odd_harmonic'], 6, 1)
+        meas_grid.addWidget(self.inputs['max_odd_harmonic'], 4, 1)
 
         lbl_hint = QLabel('原始电流和工频处理后电流会同时保存')
         lbl_hint.setFont(self.ui_font)
         lbl_hint.setStyleSheet('font-weight: normal; color: #555555;')
-        meas_grid.addWidget(lbl_hint, 6, 2, 1, 2)
+        meas_grid.addWidget(lbl_hint, 4, 2, 1, 2)
 
         box_vbox.addWidget(meas_box)
 
@@ -1225,7 +1288,6 @@ class ItStepWidget(BaseAppWidget):
             self.inputs[key] = ent
 
         add_param(gg_s, 0, 0, '目标栅压 (V):', 'g_target_s', '0.5')
-        add_param(gg_s, 0, 2, '栅压 NPLC:', 'g_nplc_s', '1.0')
         add_param(gg_s, 1, 0, '爬坡/归零步长 (V) (正):', 'g_ramp_step_s', '0.1')
         add_param(gg_s, 1, 2, '栅压单步延时 (s):', 'g_step_delay_s', '0.5')
         add_param(gg_s, 2, 0, '栅电流限值 (A):', 'g_ilimit_s', '1e-9')
@@ -1236,7 +1298,6 @@ class ItStepWidget(BaseAppWidget):
         gg_st = QGridLayout(self.wg_g_step)
         gg_st.setContentsMargins(0, 0, 0, 0)
         add_param(gg_st, 0, 0, '起始栅压 (V):', 'g_start', '0.0')
-        add_param(gg_st, 0, 2, '栅压 NPLC:', 'g_nplc_st', '1.0')
         add_param(gg_st, 1, 0, '终止栅压 (V):', 'g_end', '1.0')
         add_param(gg_st, 1, 2, '栅压单步延时 (s):', 'g_step_delay_st', '0.5')
         add_param(gg_st, 2, 0, '栅压测试步长 (V) (正):', 'g_test_step', '0.2')
@@ -1275,7 +1336,6 @@ class ItStepWidget(BaseAppWidget):
         gb_s = QGridLayout(self.wg_b_single)
         gb_s.setContentsMargins(0, 0, 0, 0)
         add_param(gb_s, 0, 0, '目标偏压 (V):', 'b_target_s', '0.1')
-        add_param(gb_s, 0, 2, '偏压 NPLC (高速低噪推荐0.05):', 'b_nplc_s', '0.05')
         add_param(gb_s, 1, 0, '爬坡/归零步长 (V) (正):', 'b_ramp_step_s', '0.001')
         add_param(gb_s, 1, 2, '偏压单步延时 (s):', 'b_step_delay_s', '0.01')
         add_param(gb_s, 2, 0, '偏压固定电流量程 (A):', 'b_range_s', '1e-6')
@@ -1290,7 +1350,6 @@ class ItStepWidget(BaseAppWidget):
         add_param(gb_st, 0, 0, '起始偏压 (V):', 'b_start', '0.1')
         add_param(gb_st, 0, 2, '偏压电流限制 (A):', 'b_ilimit_st', '1.05e-6')
         add_param(gb_st, 1, 0, '终止偏压 (V):', 'b_end', '0.3')
-        add_param(gb_st, 1, 2, '偏压 NPLC (高速低噪推荐0.05):', 'b_nplc_st', '0.05')
         add_param(gb_st, 2, 0, '偏压测试步长 (V) (正):', 'b_test_step', '0.05')
         add_param(gb_st, 2, 2, '偏压单步延时 (s):', 'b_step_delay_st', '0.01')
         add_param(gb_st, 3, 0, '爬坡/归零步长 (V) (正):', 'b_ramp_step_st', '0.001')
@@ -1391,6 +1450,7 @@ class ItStepWidget(BaseAppWidget):
 
     def toggle_gate(self):
         self.gate_box.setVisible(self.cb_gate.isChecked())
+        self.set_sampling_gate_available(self.cb_gate.isChecked())
 
     def toggle_g_mode(self):
         is_single = self.rb_g_single.isChecked()
@@ -1437,12 +1497,15 @@ class ItStepWidget(BaseAppWidget):
             )
             preset = {
                 'gate_enabled': gate_enabled,
+                'acquisition_mode': selected_acquisition_mode(self),
+                'sample_nplc': float(p['sample_nplc']),
+                'gate_monitor_interval': float(p['gate_monitor_interval']),
                 'meas_mode': p['meas_mode'],
                 'num_points': float(p['num_points']),
                 'duration': float(p['duration']),
                 'plot_interval': int(p['plot_interval']),
                 'transfer_chunk_points': int(p['plot_interval']),
-                'autozero_mode': p['autozero_mode'],
+                'autozero_mode': 'block_once',
                 'line_filter_mode': p['line_filter_mode'],
                 'line_frequency': float(p['line_frequency']),
                 'line_search_hz': float(p['line_search_hz']),
@@ -1457,7 +1520,6 @@ class ItStepWidget(BaseAppWidget):
             preset['g_mode'] = 'single' if self.rb_g_single.isChecked() else 'step'
             if preset['g_mode'] == 'single':
                 preset['g_target'] = float(p['g_target_s'])
-                preset['g_nplc'] = float(p['g_nplc_s'])
                 preset['g_ramp_step'] = float(p['g_ramp_step_s'])
                 if preset['g_ramp_step'] <= 0:
                     raise ValueError(f'栅压爬坡步长必须为正值，当前值: {p["g_ramp_step_s"]}')
@@ -1470,7 +1532,6 @@ class ItStepWidget(BaseAppWidget):
                 preset['g_test_step'] = float(p['g_test_step'])
                 if preset['g_test_step'] <= 0:
                     raise ValueError(f'栅压测试步长必须为正值，当前值: {p["g_test_step"]}')
-                preset['g_nplc'] = float(p['g_nplc_st'])
                 preset['g_ramp_step'] = float(p['g_ramp_step_st'])
                 if preset['g_ramp_step'] <= 0:
                     raise ValueError(f'栅压爬坡步长必须为正值，当前值: {p["g_ramp_step_st"]}')
@@ -1482,7 +1543,6 @@ class ItStepWidget(BaseAppWidget):
             preset['b_mode'] = 'single' if self.rb_b_single.isChecked() else 'step'
             if preset['b_mode'] == 'single':
                 preset['b_target'] = float(p['b_target_s'])
-                preset['b_nplc'] = float(p['b_nplc_s'])
                 preset['b_ramp_step'] = float(p['b_ramp_step_s'])
                 if preset['b_ramp_step'] <= 0:
                     raise ValueError(f'偏压爬坡步长必须为正值，当前值: {p["b_ramp_step_s"]}')
@@ -1497,7 +1557,6 @@ class ItStepWidget(BaseAppWidget):
                 preset['b_test_step'] = float(p['b_test_step'])
                 if preset['b_test_step'] <= 0:
                     raise ValueError(f'偏压测试步长必须为正值，当前值: {p["b_test_step"]}')
-                preset['b_nplc'] = float(p['b_nplc_st'])
                 preset['b_ramp_step'] = float(p['b_ramp_step_st'])
                 if preset['b_ramp_step'] <= 0:
                     raise ValueError(f'偏压爬坡步长必须为正值，当前值: {p["b_ramp_step_st"]}')
@@ -1514,8 +1573,9 @@ class ItStepWidget(BaseAppWidget):
                 raise ValueError('采样时长必须大于 0')
             if preset['plot_interval'] <= 0:
                 raise ValueError('界面刷新间隔必须为正整数')
-            if preset['autozero_mode'] not in ('block_once', 'off'):
-                raise ValueError('自动调零模式必须为 block_once 或 off')
+            validate_nplc(preset['sample_nplc'], '测量 NPLC')
+            if preset['gate_monitor_interval'] <= 0:
+                raise ValueError('栅电流监测间隔必须大于 0')
             if preset['line_filter_mode'] not in ('harmonic_fit', 'off'):
                 raise ValueError('工频处理模式必须为 harmonic_fit 或 off')
             if preset['line_frequency'] <= 0:
@@ -1528,8 +1588,6 @@ class ItStepWidget(BaseAppWidget):
             ):
                 raise ValueError('最高奇次谐波必须为正奇数，例如 1、3、5')
             for key, label in [
-                ('g_nplc', '栅压 NPLC'),
-                ('b_nplc', '偏压 NPLC'),
                 ('g_ilimit', '栅电流限值'),
                 ('b_ilimit', '偏压电流限制'),
             ]:
@@ -1674,6 +1732,9 @@ class ItStepWidget(BaseAppWidget):
             elif msg_type == 'gate_leakage':
                 self.status_labels['gate_i'].setText(f"{msg[_1]:.6e}")
 
+            elif msg_type == 'gate_leakage_unavailable':
+                self.status_labels['gate_i'].setText('未监测（高速模式）')
+
             elif msg_type == 'data_batch':
                 target_vg, target_vb = msg[_1], msg[_2]
                 batch_t, batch_raw, batch_filtered = msg[_3], msg[_4], msg[_5]
@@ -1745,7 +1806,7 @@ class ItStepWidget(BaseAppWidget):
                         f"{filter_meta['filtered_std_A']:.3e} A"
                     )
 
-                if self.cb_plot.isChecked() and self.data_count > 0:
+                if self.data_count > 0:
                     self.curve_raw.setData(
                         self.time_data[:self.data_count],
                         self.raw_curr_data[:self.data_count],
@@ -1759,15 +1820,14 @@ class ItStepWidget(BaseAppWidget):
 
     def update_plot(self):
         if self.points_changed and self.data_count > 0:
-            if self.cb_plot.isChecked():
-                self.curve_raw.setData(
-                    self.time_data[:self.data_count],
-                    self.raw_curr_data[:self.data_count],
-                )
-                self.curve_it.setData(
-                    self.time_data[:self.data_count],
-                    self.filtered_curr_data[:self.data_count],
-                )
+            self.curve_raw.setData(
+                self.time_data[:self.data_count],
+                self.raw_curr_data[:self.data_count],
+            )
+            self.curve_it.setData(
+                self.time_data[:self.data_count],
+                self.filtered_curr_data[:self.data_count],
+            )
             self.points_changed = False
 
     def save_data(

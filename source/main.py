@@ -675,6 +675,12 @@ class MainWindow(QMainWindow):
                         [float(value) for value in row]
                         for row in widget.waveform
                     ]
+                if hasattr(widget, 'rb_sample_triggered'):
+                    mod_data['acquisition_mode'] = (
+                        'realtime'
+                        if widget.rb_sample_realtime.isChecked()
+                        else 'triggered'
+                    )
                 if hasattr(widget, 'gate_settings'):
                     if hasattr(widget, 'current_gate_settings'):
                         mod_data['__gate_settings__'] = (
@@ -739,6 +745,10 @@ class MainWindow(QMainWindow):
                     control = getattr(widget, attr_name, None)
                     if isinstance(control, (QCheckBox, QRadioButton)):
                         control.setChecked(bool(checked))
+                if hasattr(widget, 'rb_sample_triggered'):
+                    mode = str(mod_data.get('acquisition_mode', 'triggered'))
+                    widget.rb_sample_realtime.setChecked(mode == 'realtime')
+                    widget.rb_sample_triggered.setChecked(mode != 'realtime')
                 if str(mod_data.get('__folder__', '')).strip():
                     if hasattr(widget, 'ent_folder'):
                         widget.ent_folder.setText(str(mod_data['__folder__']))

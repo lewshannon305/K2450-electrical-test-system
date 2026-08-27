@@ -614,11 +614,7 @@ class PlotSettingsDialog(QDialog):
                 page_form.addRow(self.cb_it_std)
             else:
                 drive = 'Gate voltage' if module_id == 'arbitrary_gate' else 'Bias voltage'
-                current_text = (
-                    '中图 Bias current–Time；下图 Gate current–Time'
-                    if module_id == 'arbitrary_gate'
-                    else '下图 Current–Time'
-                )
+                current_text = '下图 Bias current–Time' if module_id == 'arbitrary_gate' else '下图 Current–Time'
                 page_form.addRow(QLabel(
                     f'固定布局：上图 {drive}–Time；{current_text}'
                 ))
@@ -1322,23 +1318,16 @@ class PlotSettingsDialog(QDialog):
             )
             isd = .15 + .9/(1+np.exp(-5*drive))
             isd += .025*np.sin(2*np.pi*13*t)
-            ig = 0.04 * drive + .004*np.sin(2*np.pi*7*t)
             top = self.preview_widget.addPlot(row=0, col=0)
-            middle = self.preview_widget.addPlot(row=1, col=0)
-            bottom = self.preview_widget.addPlot(row=2, col=0)
+            bottom = self.preview_widget.addPlot(row=1, col=0)
             top.setXLink(bottom)
-            middle.setXLink(bottom)
             top.plot(t, drive, pen=pen2)
-            middle.plot(t, isd, pen=pen1)
-            bottom.plot(t, ig, pen=pg.mkPen('#388E3C', width=1.5))
+            bottom.plot(t, isd, pen=pen1)
             self._configure_preview_plot(
                 top, module, title, '', 'Gate voltage (V)'
             )
             self._configure_preview_plot(
-                middle, module, '', '', 'Bias current (nA)'
-            )
-            self._configure_preview_plot(
-                bottom, module, '', 'Time (s)', 'Gate current (nA)'
+                bottom, module, '', 'Time (s)', 'Bias current (nA)'
             )
         else:
             t = np.linspace(0, 6, 900)
@@ -2309,27 +2298,23 @@ def render_result(result, settings):
 
     fig = _new_figure(module)
     if module_id == 'arbitrary_gate':
-        if data.shape[1] < 5:
-            raise ValueError('任意栅压数据必须包含 Isd 和 Ig 五列数据')
-        axes = fig.subplots(3, 1, sharex=True)
+        if data.shape[1] < 4:
+            raise ValueError('任意栅压数据必须包含时间、栅压、偏压和 Isd 四列数据')
+        axes = fig.subplots(2, 1, sharex=True)
         voltage_scaled, voltage_unit, _voltage_factor = _engineering_voltage(
             data[:, 1]
         )
         isd_scaled, isd_unit, _isd_factor = _engineering_current(data[:, 3])
-        ig_scaled, ig_unit, _ig_factor = _engineering_current(data[:, 4])
-        colors = _module_palette(module, 3)
-        axes[0].plot(time_values, voltage_scaled, color=colors[2])
+        colors = _module_palette(module, 2)
+        axes[0].plot(time_values, voltage_scaled, color=colors[1])
         axes[0].set_ylabel(_label_with_unit(
             'Gate voltage (V)', 'Gate voltage', voltage_unit
         ))
         axes[1].plot(time_values, isd_scaled, color=colors[0])
         axes[1].set_ylabel(f'$I_{{sd}}$ ({isd_unit})')
-        axes[2].plot(time_values, ig_scaled, color=colors[1])
-        axes[2].set_ylabel(f'$I_g$ ({ig_unit})')
-        axes[2].set_xlabel(module.get('x_label') or 'Time (s)')
+        axes[1].set_xlabel(module.get('x_label') or 'Time (s)')
         _decorate_axis(axes[0], settings)
         _decorate_axis(axes[1], settings, current_axis=True)
-        _decorate_axis(axes[2], settings, current_axis=True)
         fig.suptitle(module.get('title', '') + status)
         _apply_figure_style(fig, settings, partial=partial)
         return _save_all_formats(fig, output, stem_base, module)

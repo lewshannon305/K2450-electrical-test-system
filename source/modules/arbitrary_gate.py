@@ -1,13 +1,12 @@
 import os
 import time
-import threading
 import numpy as np
 import pyvisa
 
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
     QLineEdit, QPushButton, QGroupBox, QTextEdit, QScrollArea, QFileDialog,
-    QMessageBox, QSizePolicy, QDialog
+    QMessageBox, QSizePolicy, QDialog, QRadioButton, QButtonGroup
 )
 from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtGui import QFont
@@ -37,6 +36,16 @@ from core.hardware_base import (
     write_result_metadata,
 )
 from core.instrument_config import InstrumentSettings
+from core.time_acquisition import (
+    ACQUISITION_REALTIME,
+    ACQUISITION_TRIGGERED,
+    GATE_MONITOR_NPLC,
+    InternalSegmentCollector,
+    RealtimeSampler,
+    create_sampling_settings,
+    selected_acquisition_mode,
+    timing_metadata,
+)
 from core.utils import NoScrollComboBox, _0, _1, _2, _3, _4, _5, _6, _7, configure_pyqtgraph
 
 
@@ -308,8 +317,7 @@ class GateArbMeasurement:
 
     def setup(self):
         try:
-            validate_nplc(self.params['b_nplc'], '偏压NPLC')
-            validate_nplc(self.params['g_nplc'], '栅压NPLC')
+            validate_nplc(self.params['sample_nplc'], '测量NPLC')
             validate_terminal(self.params['bias_terminal'], '偏压端子')
             validate_terminal(self.params['gate_terminal'], '栅压端子')
             validate_source_voltage(self.params['b_target'], '偏压目标')
@@ -333,8 +341,8 @@ class GateArbMeasurement:
             k_b.write('SENS:CURR:RSEN OFF')
             k_b.write(f':ROUT:TERM {self.params["bias_terminal"]}')
             k_b.write(':SENS:CURR:AVER OFF')
-            k_b.write(':SOUR:VOLT:READ:BACK ON')
-            k_b.write(f':SENS:CURR:NPLC {self.params["b_nplc"]}')
+            k_b.write(':SOUR:VOLT:READ:BACK OFF')
+            k_b.write(f':SENS:CURR:NPLC {self.params["sample_nplc"]}')
 
             r_val = self.params['b_range']
             if str(r_val).upper() == 'AUTO':
@@ -356,8 +364,8 @@ class GateArbMeasurement:
             k_g.write('SENS:CURR:RSEN OFF')
             k_g.write(f':ROUT:TERM {self.params["gate_terminal"]}')
             k_g.write(':SENS:CURR:AVER OFF')
-            k_g.write(':SOUR:VOLT:READ:BACK ON')
-            k_g.write(f':SENS:CURR:NPLC {self.params["g_nplc"]}')
+            k_g.write(':SOUR:VOLT:READ:BACK OFF')
+            k_g.write(f':SENS:CURR:NPLC {GATE_MONITOR_NPLC}')
 
             r_val_g = self.params['g_range']
             if str(r_val_g).upper() == 'AUTO':
@@ -374,7 +382,7 @@ class GateArbMeasurement:
                 return
             verify_current_configuration(
                 k_b,
-                nplc=self.params['b_nplc'],
+                nplc=self.params['sample_nplc'],
                 current_range=self.params['b_range'],
                 current_limit=self.params['b_ilimit'],
                 terminal=self.params['bias_terminal'],
@@ -383,7 +391,7 @@ class GateArbMeasurement:
             )
             verify_current_configuration(
                 k_g,
-                nplc=self.params['g_nplc'],
+                nplc=GATE_MONITOR_NPLC,
                 current_range=self.params['g_range'],
                 current_limit=self.params['g_ilimit'],
                 terminal=self.params['gate_terminal'],
@@ -495,7 +503,9 @@ class GateArbMeasurement:
                 ('log', f'安全归零失败，已执行紧急关断：{exc}'))
 
     def run(self):
-        times, v_outs, isd_outs, ig_outs = [], [], [], []
+        times, v_outs, isd_outs = [], [], []
+        collector = None
+        metadata = {}
         vb = self.params['b_target']
         try:
             self.connect()
@@ -517,33 +527,27 @@ class GateArbMeasurement:
             if not self._ramp_voltage(self.gate_k, first_g_v, self.params['g_ramp_step'], 0.01, is_gate=True):
                 return
 
-            warmup_read_times = []
-            for _ in range(10):
-                if self.stop_event.is_set() or self.force_stop_event.is_set():
-                    return
-                warmup_started = time.perf_counter()
-                required_float_query(
-                    self.bias_k, ':READ?', '任意栅压预热偏压电流读数'
-                )
-                required_float_query(
-                    self.gate_k, ':READ?', '任意栅压预热栅电流读数'
-                )
-                warmup_read_times.append(
-                    time.perf_counter() - warmup_started
-                )
-
             self.update_queue.put(('stage', '波形输出中'))
 
             p_settle = self.params['switch_settle']
             cycles = int(self.params['cycles'])
             plot_interval = self.params['plot_interval']
-            batch_t, batch_v, batch_isd, batch_ig = [], [], [], []
-
-            T_start = time.perf_counter()
-            est_read_time = max(
-                sum(warmup_read_times) / len(warmup_read_times),
-                1e-4,
-            )
+            batch_t, batch_v, batch_isd = [], [], []
+            acquisition_mode = self.params['acquisition_mode']
+            if acquisition_mode == ACQUISITION_TRIGGERED:
+                self.update_queue.put(('gate_leakage_unavailable', None))
+                self.update_queue.put(('log', '任意栅压高速模式采用软件近似同步，不保证毫秒级跳变同步。'))
+                collector = InternalSegmentCollector(
+                    self.bias_k, self.update_queue, self.stop_event,
+                    self.force_stop_event, self.params['sample_nplc'],
+                    prefix='arb_gate',
+                )
+            else:
+                sampler = RealtimeSampler(
+                    self.bias_k, self.gate_k,
+                    self.params['gate_monitor_interval'],
+                    lambda current: self.update_queue.put(('gate_leakage', current)),
+                )
 
             for cycle in range(1, cycles + 1):
                 for phase_idx, (target_g, p_duration) in enumerate(waveform):
@@ -554,61 +558,50 @@ class GateArbMeasurement:
                     if p_settle > 0:
                         if not self._sleep(p_settle, "稳定等待中"):
                             break
-                    absolute_deadline = time.perf_counter() + p_duration
-
-                    while True:
-                        now = time.perf_counter()
-                        remaining = absolute_deadline - now
-
-                        # Always acquire while this phase still owns time; a slow
-                        # transition read must not suppress later short phases.
-                        if remaining <= 0:
-                            break
-
-                        if self.stop_event.is_set() or self.force_stop_event.is_set():
-                            break
-
-                        t0 = time.perf_counter()
-                        isd = required_float_query(
-                            self.bias_k, ':READ?', '任意栅压正式偏压电流读数'
-                        )
-                        ig = required_float_query(
-                            self.gate_k, ':READ?', '任意栅压正式栅电流读数'
-                        )
-                        t1 = time.perf_counter()
-
-                        actual_read_time = t1 - t0
-                        est_read_time = 0.7 * est_read_time + 0.3 * actual_read_time
-
-                        rel_time = (t0 + t1) / 2 - T_start
-                        times.append(rel_time)
-                        v_outs.append(target_g)
-                        isd_outs.append(isd)
-                        ig_outs.append(ig)
-                        batch_t.append(rel_time)
-                        batch_v.append(target_g)
-                        batch_isd.append(isd)
-                        batch_ig.append(ig)
-
-                        if len(batch_t) >= plot_interval:
-                            self.update_queue.put(
-                                ('data_batch', vb, batch_t, batch_v,
-                                 batch_isd, batch_ig, cycle, cycles))
-                            batch_t, batch_v, batch_isd, batch_ig = [], [], [], []
-
-                    while time.perf_counter() < absolute_deadline:
-                        if self.stop_event.is_set() or self.force_stop_event.is_set():
-                            break
-                        if not self._sleep(0.0005, ""):
-                            break
+                    if acquisition_mode == ACQUISITION_TRIGGERED:
+                        collector.acquire_segment(target_g, p_duration)
+                    else:
+                        absolute_deadline = time.perf_counter() + p_duration
+                        while time.perf_counter() < absolute_deadline:
+                            if self.stop_event.is_set() or self.force_stop_event.is_set():
+                                break
+                            rel_time, isd = sampler.sample(
+                                '任意栅压正式偏压电流读数'
+                            )
+                            times.append(rel_time)
+                            v_outs.append(target_g)
+                            isd_outs.append(isd)
+                            batch_t.append(rel_time)
+                            batch_v.append(target_g)
+                            batch_isd.append(isd)
+                            if len(batch_t) >= plot_interval:
+                                self.update_queue.put(
+                                    ('data_batch', vb, batch_t, batch_v,
+                                     batch_isd, cycle, cycles))
+                                batch_t, batch_v, batch_isd = [], [], []
 
                 if self.stop_event.is_set() or self.force_stop_event.is_set():
                     break
 
-            if batch_t:
+            if collector is not None:
+                self.update_queue.put(('stage', '读取2450内部高速缓冲'))
+                t, v, i = collector.read_all()
+                times, v_outs, isd_outs = t.tolist(), v.tolist(), i.tolist()
+                metadata['segments'] = collector.transition_metadata()
+                metadata['synchronization'] = 'software_approximate'
+                for start in range(0, len(times), max(1000, plot_interval)):
+                    end = min(len(times), start + max(1000, plot_interval))
+                    self.update_queue.put(('data_batch', vb, times[start:end], v_outs[start:end], isd_outs[start:end], cycles, cycles))
+            elif batch_t:
                 self.update_queue.put(
                     ('data_batch', vb, batch_t, batch_v,
-                     batch_isd, batch_ig, cycles, cycles))
+                     batch_isd, cycles, cycles))
+
+            metadata.update(timing_metadata(times))
+            metadata.update({
+                'acquisition_mode': acquisition_mode,
+                'nplc': float(self.params['sample_nplc']),
+            })
 
             fname = self.params['filename']
             result_status = (
@@ -617,18 +610,37 @@ class GateArbMeasurement:
                 else 'complete'
             )
             self.update_queue.put(
-                ('block_done', vb, times, v_outs, isd_outs, ig_outs,
+                ('block_done', vb, times, v_outs, isd_outs,
                  fname, result_status,
-                 None if result_status == 'complete' else '用户停止或强制终止'))
+                 None if result_status == 'complete' else '用户停止或强制终止',
+                 metadata))
 
         except Exception as e:
             self.update_queue.put(('log', f"测量中断或出错: {e}"))
+            if collector is not None and not times:
+                try:
+                    t, v, i = collector.read_all()
+                    times, v_outs, isd_outs = t.tolist(), v.tolist(), i.tolist()
+                    metadata['segments'] = collector.transition_metadata()
+                    metadata['synchronization'] = 'software_approximate'
+                    metadata.update(timing_metadata(times))
+                    metadata.update({
+                        'acquisition_mode': ACQUISITION_TRIGGERED,
+                        'nplc': float(self.params['sample_nplc']),
+                    })
+                except Exception as fetch_exc:
+                    self.update_queue.put(('log', f'部分高速数据读取失败: {fetch_exc}'))
             if times:
                 self.update_queue.put((
-                    'block_done', vb, times, v_outs, isd_outs, ig_outs,
-                    self.params['filename'], 'partial', e,
+                    'block_done', vb, times, v_outs, isd_outs,
+                    self.params['filename'], 'partial', e, metadata,
                 ))
         finally:
+            if collector is not None:
+                try:
+                    collector.cleanup()
+                except Exception as exc:
+                    self.update_queue.put(('log', f'高速缓冲清理失败: {exc}'))
             try:
                 self.safe_zeroing()
             except Exception as exc:
@@ -682,7 +694,6 @@ class ArbitraryGateWidget(BaseAppWidget):
         self.time_data = np.zeros(self.capacity)
         self.v_data = np.zeros(self.capacity)
         self.isd_data = np.zeros(self.capacity)
-        self.ig_data = np.zeros(self.capacity)
         self.points_changed = False
 
         self.current_folder = ""
@@ -726,21 +737,6 @@ class ArbitraryGateWidget(BaseAppWidget):
         self.plot_isd.setClipToView(True)
         self.curve_isd = self.plot_isd.plot(pen=pg.mkPen('b', width=1.5))
         self.plot_isd.setXLink(self.plot_v)
-
-        self.graph_widget.nextRow()
-
-        self.plot_ig = self.graph_widget.addPlot(
-            title="Gate Current vs Time")
-        self.plot_ig.setLabel('left', text='Gate Current',
-                              units='A', **label_style)
-        self.plot_ig.setLabel('bottom', text='Time', units='s', **label_style)
-        self.plot_ig.getAxis('left').setTickFont(self.ui_font)
-        self.plot_ig.getAxis('bottom').setTickFont(self.ui_font)
-        self.plot_ig.showGrid(x=True, y=True, alpha=0.3)
-        self.plot_ig.setDownsampling(auto=True, mode='peak')
-        self.plot_ig.setClipToView(True)
-        self.curve_ig = self.plot_ig.plot(pen=pg.mkPen('g', width=1.5))
-        self.plot_ig.setXLink(self.plot_v)
 
         right_layout = QVBoxLayout()
         main_layout.addLayout(right_layout, stretch=2)
@@ -789,6 +785,12 @@ class ArbitraryGateWidget(BaseAppWidget):
 
         self.inputs = {}
 
+        sampling_box = create_sampling_settings(
+            self, self.inputs, self.ui_font, self.bold_font,
+            gate_available=True, approximate_sync=True,
+        )
+        box_vbox.addWidget(sampling_box)
+
         meas_box = QGroupBox("栅压波形配置")
         meas_box.setFont(self.bold_font)
         meas_grid = QGridLayout(meas_box)
@@ -819,11 +821,9 @@ class ArbitraryGateWidget(BaseAppWidget):
 
         add_p(2, 0, "循环次数:", "cycles", "1")
         add_p(2, 2, "跃变缓冲时延 (s):", "switch_settle", "0.0")
-        add_p(3, 0, "栅压 NPLC:", "g_nplc", "1.0")
-        add_p(3, 2, "栅压爬坡步长 (V) (正):", "g_ramp_step", "0.05")
-        add_p(4, 0, "栅压电流量程 (A / AUTO):", "g_range", "AUTO")
-        add_p(4, 2, "栅压限流 (A):", "g_ilimit", "1e-9")
-        add_p(5, 0, "界面刷新间隔(点数):", "plot_interval", "50")
+        add_p(3, 0, "栅压爬坡步长 (V) (正):", "g_ramp_step", "0.05")
+        add_p(3, 2, "栅压电流量程 (A / AUTO):", "g_range", "AUTO")
+        add_p(4, 0, "栅压限流 (A):", "g_ilimit", "1e-9")
 
         box_vbox.addWidget(meas_box)
 
@@ -846,8 +846,7 @@ class ArbitraryGateWidget(BaseAppWidget):
         add_bp(1, 0, "偏压单步时延 (s):", "b_step_delay", "0.01")
         add_bp(1, 2, "偏压到位等待 (s):", "b_settle", "2.0")
         add_bp(2, 0, "偏压电流量程(A / AUTO):", "b_range", "AUTO")
-        add_bp(2, 2, "偏压 NPLC:", "b_nplc", "0.01")
-        add_bp(3, 0, "偏压限流 (A):", "b_ilimit", "0.1")
+        add_bp(2, 2, "偏压限流 (A):", "b_ilimit", "0.1")
 
         box_vbox.addWidget(self.bias_box)
 
@@ -986,6 +985,9 @@ class ArbitraryGateWidget(BaseAppWidget):
 
             instrument = self.instrument_settings.snapshot(require_gate=True)
             preset = {
+                'acquisition_mode': selected_acquisition_mode(self),
+                'sample_nplc': float(p['sample_nplc']),
+                'gate_monitor_interval': float(p['gate_monitor_interval']),
                 'waveform': self.waveform,
                 'cycles': int(p['cycles']),
                 'switch_settle': float(p['switch_settle']),
@@ -997,7 +999,6 @@ class ArbitraryGateWidget(BaseAppWidget):
                 'gate_terminal': instrument['gate_terminal'],
 
                 'b_target': float(p['b_target']),
-                'b_nplc': float(p['b_nplc']),
                 'b_ramp_step': b_ramp_step,
                 'b_step_delay': float(p['b_step_delay']),
                 'b_settle': float(p['b_settle']),
@@ -1005,7 +1006,6 @@ class ArbitraryGateWidget(BaseAppWidget):
                 'b_ilimit': float(p['b_ilimit']),
 
                 'g_ramp_step': g_ramp_step,
-                'g_nplc': float(p['g_nplc']),
                 'g_range': p['g_range'],
                 'g_ilimit': float(p['g_ilimit']),
             }
@@ -1015,8 +1015,9 @@ class ArbitraryGateWidget(BaseAppWidget):
                 raise ValueError('跃变缓冲时延不能为负值')
             if preset['plot_interval'] <= 0:
                 raise ValueError('界面刷新间隔必须为正整数')
-            if preset['b_nplc'] <= 0:
-                raise ValueError('偏压 NPLC 必须大于 0')
+            validate_nplc(preset['sample_nplc'], '测量 NPLC')
+            if preset['gate_monitor_interval'] <= 0:
+                raise ValueError('栅电流监测间隔必须大于 0')
             if preset['b_step_delay'] < 0:
                 raise ValueError('偏压单步时延不能为负值')
             if preset['b_settle'] < 0:
@@ -1026,8 +1027,6 @@ class ArbitraryGateWidget(BaseAppWidget):
             b_range = str(preset['b_range']).strip()
             if b_range.upper() != 'AUTO' and float(b_range) <= 0:
                 raise ValueError('偏压量程必须大于 0 或为 AUTO')
-            if preset['g_nplc'] <= 0:
-                raise ValueError('栅压 NPLC 必须大于 0')
             if preset['g_ilimit'] <= 0:
                 raise ValueError('栅压限流必须大于 0')
             g_range = str(preset['g_range']).strip()
@@ -1056,10 +1055,8 @@ class ArbitraryGateWidget(BaseAppWidget):
         self.time_data.fill(0)
         self.v_data.fill(0)
         self.isd_data.fill(0)
-        self.ig_data.fill(0)
         self.curve_v.setData([], [])
         self.curve_isd.setData([], [])
-        self.curve_ig.setData([], [])
 
         while not self.update_queue.empty():
             self.update_queue.get()
@@ -1150,14 +1147,16 @@ class ArbitraryGateWidget(BaseAppWidget):
             elif msg_type == 'gate_leakage':
                 self.status_labels['gate_i'].setText(f"{msg[_1]:.6e}")
 
+            elif msg_type == 'gate_leakage_unavailable':
+                self.status_labels['gate_i'].setText('未监测（高速模式）')
+
             elif msg_type == 'data_batch':
-                target_vb, batch_t, batch_v, batch_isd, batch_ig, cycle, total_cycles = msg[
-                    _1], msg[_2], msg[_3], msg[_4], msg[_5], msg[_6], msg[_7]
+                target_vb, batch_t, batch_v, batch_isd, cycle, total_cycles = msg[
+                    _1], msg[_2], msg[_3], msg[_4], msg[_5], msg[_6]
                 if batch_t:
                     self.status_labels['bias_v'].setText(f"{target_vb:.6f}")
                     self.status_labels['gate_v'].setText(f"{batch_v[-1]:.6f}")
                     self.status_labels['bias_i'].setText(f"{batch_isd[-1]:.6e}")
-                    self.status_labels['gate_i'].setText(f"{batch_ig[-1]:.6e}")
                     self.status_labels['time'].setText(f"{batch_t[-1]:.3f}")
                     self.status_labels['stage'].setText(
                         f"执行波形 [循环 {cycle}/{total_cycles}]")
@@ -1173,31 +1172,31 @@ class ArbitraryGateWidget(BaseAppWidget):
                         self.time_data = np.pad(self.time_data, (0, grow))
                         self.v_data = np.pad(self.v_data, (0, grow))
                         self.isd_data = np.pad(self.isd_data, (0, grow))
-                        self.ig_data = np.pad(self.ig_data, (0, grow))
                         self.capacity = new_capacity
                         self.log_info(f'绘图缓存已自动扩容至 {new_capacity} 点')
                     self.time_data[self.data_count:needed] = batch_t
                     self.v_data[self.data_count:needed] = batch_v
                     self.isd_data[self.data_count:needed] = batch_isd
-                    self.ig_data[self.data_count:needed] = batch_ig
                     self.data_count = needed
                     self.points_changed = True
 
             elif msg_type == 'block_done':
-                vb, times, v_outs, isd_outs, ig_outs, fname = (
-                    msg[_1], msg[_2], msg[_3], msg[_4], msg[_5], msg[_6]
+                vb, times, v_outs, isd_outs, fname = (
+                    msg[_1], msg[_2], msg[_3], msg[_4], msg[_5]
                 )
-                status = msg[7] if len(msg) > 7 else 'complete'
-                error = msg[8] if len(msg) > 8 else None
+                status = msg[6] if len(msg) > 6 else 'complete'
+                error = msg[7] if len(msg) > 7 else None
+                metadata = msg[8] if len(msg) > 8 else {}
                 self.note_result_status(status, error)
                 rate = len(times) / \
                     times[-1] if len(times) > 1 and times[-1] > 0 else 0
                 self.status_labels['rate'].setText(f"{rate:.2f}")
                 self.submit_save(
                     self.save_data,
-                    vb, times, v_outs, isd_outs, ig_outs, fname,
+                    vb, times, v_outs, isd_outs, fname,
                     self.current_folder,
                     status=status, error=error,
+                    metadata=metadata,
                     stopped_at_local=time.strftime('%Y-%m-%d %H:%M:%S'),
                 )
 
@@ -1209,36 +1208,30 @@ class ArbitraryGateWidget(BaseAppWidget):
                 self.time_data[:self.data_count], self.v_data[:self.data_count])
             self.curve_isd.setData(
                 self.time_data[:self.data_count], self.isd_data[:self.data_count])
-            self.curve_ig.setData(
-                self.time_data[:self.data_count], self.ig_data[:self.data_count])
             self.points_changed = False
 
     def save_data(
-        self, vb, times, v_outs, isd_outs, ig_outs, filename, output_folder,
-        status='complete', error=None, stopped_at_local=None,
+        self, vb, times, v_outs, isd_outs, filename, output_folder,
+        status='complete', error=None, metadata=None, stopped_at_local=None,
     ):
         if status != 'complete':
             stem, suffix = os.path.splitext(filename)
             filename = f'{stem}_partial{suffix}'
         fp = allocate_unique_path(output_folder, filename)
         try:
-            lengths = {
-                len(times), len(v_outs), len(isd_outs), len(ig_outs)
-            }
+            lengths = {len(times), len(v_outs), len(isd_outs)}
             if len(lengths) != 1:
-                raise ValueError('时间、栅压、Isd 与 Ig 数据长度不一致')
+                raise ValueError('时间、栅压与 Isd 数据长度不一致')
             with atomic_text_writer(fp) as f:
                 f.write(
                     "Time(s)\tGateVoltage(V)\tBiasVoltage(V)\t"
-                    "BiasCurrent(A)\tGateCurrent(A)\n"
+                    "BiasCurrent(A)\n"
                 )
-                for t, v, isd, ig in zip(times, v_outs, isd_outs, ig_outs):
-                    f.write(
-                        f"{t:.6f}\t{v:.6f}\t{vb:.6f}\t{isd:.6e}\t{ig:.6e}\n"
-                    )
+                for t, v, isd in zip(times, v_outs, isd_outs):
+                    f.write(f"{t:.6f}\t{v:.6f}\t{vb:.6f}\t{isd:.6e}\n")
             write_result_metadata(
                 fp, status=status, point_count=len(times), error=error,
-                stopped_at_local=stopped_at_local,
+                extra=metadata, stopped_at_local=stopped_at_local,
             )
             self.post_log(f"保存成功: {fp}")
             return {'paths': [str(fp)], 'status': status, 'error': error}

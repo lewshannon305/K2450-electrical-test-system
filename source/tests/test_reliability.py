@@ -38,7 +38,7 @@ from core.hardware_base import (
     verify_current_configuration,
     write_result_metadata,
 )
-from modules.it_step_setgate import ItMeasurement, _8, _fit_line_harmonics
+from modules.it_step_setgate import ItMeasurement, ItStepWidget, _8, _fit_line_harmonics
 from modules.isd_vg_setvsd import IsdVgMeasurement
 from modules.iv_curve import (
     IV_Measurement,
@@ -51,11 +51,12 @@ from modules.iv_curve import (
 )
 from modules.mapping_scan import MappingMeasurement
 from modules.break_junction import BreakMeasurement
-from modules.arbitrary_bias import ArbMeasurement
+from modules.arbitrary_bias import ArbMeasurement, ArbitraryBiasWidget
 from modules.arbitrary_gate import ArbitraryGateWidget, GateArbMeasurement
 from main import MainWindow, WelcomePage, parse_config_modules
 from core.app_base import BaseAppWidget
 from core.instrument_config import InstrumentSettings
+from core.time_acquisition import InternalSegmentCollector, timing_metadata
 
 
 class FakeInstrument:
@@ -1034,7 +1035,7 @@ class ItBufferTests(unittest.TestCase):
         self.assertEqual(_8, 8)
 
     @staticmethod
-    def _setup_responses(nplc=0.01):
+    def _setup_responses(nplc=0.05):
         return {
             ':SENS:CURR:NPLC?': str(nplc),
             ':SENS:CURR:RANG:AUTO?': '0',
@@ -1047,7 +1048,7 @@ class ItBufferTests(unittest.TestCase):
 
     def test_single_and_step_modes_validate_only_active_fields(self):
         base = {
-            'b_nplc': 0.01,
+            'sample_nplc': 0.05,
             'bias_terminal': 'REAR',
             'b_ramp_step': 0.01,
             'b_range': 1e-6,
@@ -1078,7 +1079,7 @@ class ItBufferTests(unittest.TestCase):
             'meas_mode': 'points',
             'num_points': 25,
             'duration': 1.0,
-            'b_nplc': 0.01,
+            'sample_nplc': 0.05,
         }
         measurement = ItMeasurement(
             params, queue.Queue(), threading.Event(), threading.Event()
@@ -1122,6 +1123,49 @@ class ItBufferTests(unittest.TestCase):
         self.assertEqual(len(times), 0)
         self.assertEqual(len(currents), 0)
 
+    def test_realtime_keeps_point_and_duration_end_conditions(self):
+        class DeterministicSampler:
+            def __init__(self):
+                self.index = 0
+
+            def sample(self, _label):
+                timestamp = self.index * 0.0006
+                self.index += 1
+                return timestamp, 1e-6
+
+        base = {
+            'gate_enabled': False,
+            'gate_monitor_interval': 1.0,
+            'plot_interval': 2,
+            'line_filter_mode': 'off',
+            'line_frequency': 50.0,
+            'line_search_hz': 0.5,
+            'max_odd_harmonic': 5,
+            'sample_nplc': 0.05,
+            'autozero_mode': 'block_once',
+            'num_points': 3,
+            'duration': 0.001,
+        }
+        for mode in ('points', 'time'):
+            params = dict(base, meas_mode=mode)
+            measurement = ItMeasurement(
+                params, queue.Queue(), threading.Event(), threading.Event()
+            )
+            measurement.bias_keithley = FakeInstrument({':READ?': '1e-6'})
+            with (
+                patch.object(measurement, '_single_autozero'),
+                patch(
+                    'modules.it_step_setgate.RealtimeSampler',
+                    return_value=DeterministicSampler(),
+                ),
+            ):
+                times, raw, filtered, metadata = (
+                    measurement._measure_it_realtime(0.0, 0.1)
+                )
+            self.assertEqual(len(times), 3)
+            np.testing.assert_array_equal(raw, filtered)
+            self.assertEqual(metadata['acquisition_mode'], 'realtime')
+
 
 class MappingMonitorTests(unittest.TestCase):
     def test_missing_and_expired_gate_readings_stop_measurement(self):
@@ -1161,19 +1205,15 @@ class MappingMonitorTests(unittest.TestCase):
         self.assertFalse(measurement.gate_monitor.is_alive())
 
 
-class ArbitraryGateDualCurrentTests(unittest.TestCase):
-    def _worker(self, gate_response='2e-9', duration=0.003):
+class ArbitraryGateSamplingTests(unittest.TestCase):
+    def _worker(self, gate_response='2e-9', duration=0.01):
         params = {
-            'b_target': 0.1,
-            'b_ramp_step': 0.001,
-            'b_step_delay': 0.0,
-            'b_settle': 0.0,
-            'g_ramp_step': 0.05,
-            'waveform': [[0.2, duration]],
-            'switch_settle': 0.0,
-            'cycles': 1,
-            'plot_interval': 2,
-            'filename': 'dual_current.txt',
+            'b_target': 0.1, 'b_ramp_step': 0.001,
+            'b_step_delay': 0.0, 'b_settle': 0.0,
+            'g_ramp_step': 0.05, 'waveform': [[0.2, duration]],
+            'switch_settle': 0.0, 'cycles': 1, 'plot_interval': 2,
+            'acquisition_mode': 'realtime', 'sample_nplc': 0.05,
+            'gate_monitor_interval': 0.001, 'filename': 'gate.txt',
         }
         worker = GateArbMeasurement(
             params, queue.Queue(), threading.Event(), threading.Event()
@@ -1182,55 +1222,34 @@ class ArbitraryGateDualCurrentTests(unittest.TestCase):
         worker.gate_k = FakeInstrument({':READ?': gate_response})
         return worker
 
-    def test_each_arbitrary_gate_sample_contains_isd_and_ig(self):
-        worker = self._worker()
+    def _run(self, worker):
         with (
             patch.object(worker, 'connect'),
             patch.object(worker, 'setup'),
             patch.object(worker, '_ramp_voltage', return_value=True),
             patch.object(worker, '_sleep', return_value=True),
             patch.object(worker, 'safe_zeroing'),
-            patch(
-                'modules.arbitrary_gate.reliable_output_off',
-                return_value=(True, []),
-            ),
+            patch('modules.arbitrary_gate.reliable_output_off', return_value=(True, [])),
         ):
             worker.run()
-
         messages = []
         while not worker.update_queue.empty():
             messages.append(worker.update_queue.get_nowait())
+        return messages
+
+    def test_realtime_samples_isd_and_only_monitors_ig(self):
+        messages = self._run(self._worker())
         completed = next(msg for msg in messages if msg[0] == 'block_done')
-        _kind, _vb, times, gate_voltages, isd, ig, _name, status, _error = completed
+        _kind, _vb, times, gate_v, isd, _name, status, _error, metadata = completed
         self.assertEqual(status, 'complete')
         self.assertGreater(len(times), 0)
-        self.assertEqual(
-            {len(times), len(gate_voltages), len(isd), len(ig)},
-            {len(times)},
-        )
+        self.assertEqual({len(times), len(gate_v), len(isd)}, {len(times)})
         self.assertTrue(all(value == 1e-6 for value in isd))
-        self.assertTrue(all(value == 2e-9 for value in ig))
+        self.assertTrue(any(msg[0] == 'gate_leakage' for msg in messages))
+        self.assertEqual(metadata['acquisition_mode'], 'realtime')
 
-    def test_gate_current_read_failure_stops_without_fabricating_data(self):
-        worker = self._worker(
-            gate_response=OSError('gate read failed'), duration=0.01
-        )
-        with (
-            patch.object(worker, 'connect'),
-            patch.object(worker, 'setup'),
-            patch.object(worker, '_ramp_voltage', return_value=True),
-            patch.object(worker, '_sleep', return_value=True),
-            patch.object(worker, 'safe_zeroing'),
-            patch(
-                'modules.arbitrary_gate.reliable_output_off',
-                return_value=(True, []),
-            ),
-        ):
-            worker.run()
-
-        messages = []
-        while not worker.update_queue.empty():
-            messages.append(worker.update_queue.get_nowait())
+    def test_gate_monitor_failure_stops_without_formal_ig_data(self):
+        messages = self._run(self._worker(OSError('gate read failed')))
         self.assertFalse(any(msg[0] == 'block_done' for msg in messages))
         self.assertTrue(any(
             msg[0] == 'log' and 'gate read failed' in msg[1]
@@ -1241,67 +1260,126 @@ class ArbitraryGateDualCurrentTests(unittest.TestCase):
     def test_stop_and_force_stop_save_aligned_partial_data(self):
         for event_name in ('stop_event', 'force_stop_event'):
             with self.subTest(event=event_name):
-                worker = self._worker(duration=0.02)
+                worker = self._worker(duration=0.05)
 
-                def read_current(_instrument, _command, label):
-                    if '正式栅电流' in label:
+                def read_current(instrument, _command, _label):
+                    if instrument is worker.bias_k:
                         getattr(worker, event_name).set()
-                        return 2e-9
-                    return 1e-6
+                        return 1e-6
+                    return 2e-9
 
-                with (
-                    patch.object(worker, 'connect'),
-                    patch.object(worker, 'setup'),
-                    patch.object(worker, '_ramp_voltage', return_value=True),
-                    patch.object(worker, '_sleep', return_value=True),
-                    patch.object(worker, 'safe_zeroing'),
-                    patch(
-                        'modules.arbitrary_gate.required_float_query',
-                        side_effect=read_current,
-                    ),
-                    patch(
-                        'modules.arbitrary_gate.reliable_output_off',
-                        return_value=(True, []),
-                    ),
+                with patch(
+                    'core.time_acquisition.required_float_query',
+                    side_effect=read_current,
                 ):
-                    worker.run()
-
-                messages = []
-                while not worker.update_queue.empty():
-                    messages.append(worker.update_queue.get_nowait())
-                completed = next(
-                    msg for msg in messages if msg[0] == 'block_done'
-                )
-                _kind, _vb, times, gate_v, isd, ig, _name, status, _error = completed
+                    messages = self._run(worker)
+                completed = next(msg for msg in messages if msg[0] == 'block_done')
+                _kind, _vb, times, gate_v, isd, _name, status, _error, _meta = completed
                 self.assertEqual(status, 'partial')
                 self.assertGreater(len(times), 0)
-                self.assertEqual(
-                    {len(times), len(gate_v), len(isd), len(ig)},
-                    {len(times)},
-                )
+                self.assertEqual({len(times), len(gate_v), len(isd)}, {len(times)})
 
-    def test_five_column_result_is_saved(self):
+    def test_four_column_result_is_saved(self):
         class SaveTarget:
             def post_log(self, _message):
                 pass
 
         with tempfile.TemporaryDirectory() as folder:
             result = ArbitraryGateWidget.save_data(
-                SaveTarget(), 0.1,
-                [0.0, 0.5], [0.2, -0.2],
-                [1e-6, 2e-6], [1e-9, 2e-9],
-                'gate.txt', folder,
+                SaveTarget(), 0.1, [0.0, 0.5], [0.2, -0.2],
+                [1e-6, 2e-6], 'gate.txt', folder,
             )
             self.assertEqual(result['status'], 'complete')
             path = Path(result['paths'][0])
             header = path.read_text(encoding='utf-8').splitlines()[0]
             self.assertEqual(
                 header,
-                'Time(s)\tGateVoltage(V)\tBiasVoltage(V)\t'
-                'BiasCurrent(A)\tGateCurrent(A)',
+                'Time(s)\tGateVoltage(V)\tBiasVoltage(V)\tBiasCurrent(A)',
             )
-            data = np.loadtxt(path, skiprows=1)
-            self.assertEqual(data.shape, (2, 5))
+            self.assertEqual(np.loadtxt(path, skiprows=1).shape, (2, 4))
+
+
+class UnifiedTimeSamplingTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_three_pages_share_sampling_controls_and_defaults(self):
+        widgets = [ItStepWidget(), ArbitraryBiasWidget(), ArbitraryGateWidget()]
+        try:
+            for widget in widgets:
+                self.assertTrue(widget.rb_sample_triggered.isChecked())
+                self.assertEqual(widget.inputs['sample_nplc'].text(), '0.05')
+                self.assertEqual(widget.inputs['plot_interval'].text(), '50')
+                self.assertEqual(widget.inputs['gate_monitor_interval'].text(), '1.0')
+                self.assertFalse(widget.inputs['plot_interval'].isEnabled())
+                self.assertNotIn('b_nplc', widget.inputs)
+                self.assertNotIn('g_nplc', widget.inputs)
+            self.assertFalse(hasattr(widgets[2], 'plot_ig'))
+            widgets[2].rb_sample_realtime.setChecked(True)
+            self.assertTrue(widgets[2].inputs['plot_interval'].isEnabled())
+            self.assertTrue(widgets[2].inputs['gate_monitor_interval'].isEnabled())
+        finally:
+            for widget in widgets:
+                widget.close()
+
+    def test_bundled_configs_use_new_sampling_schema(self):
+        config_dir = Path(__file__).resolve().parents[2] / 'configs'
+        for filename in ('default.json', '5T.json', '9T.json'):
+            payload = json.loads((config_dir / filename).read_text(encoding='utf-8'))
+            modules = payload['modules']
+            for module_id in ('it_step_setgate', 'arbitrary_bias', 'arbitrary_gate'):
+                data = modules[module_id]
+                self.assertEqual(data['acquisition_mode'], 'triggered')
+                self.assertEqual(str(data['sample_nplc']), '0.05')
+                self.assertEqual(str(data['gate_monitor_interval']), '1.0')
+                for old_key in ('b_nplc', 'g_nplc', 'b_nplc_s', 'b_nplc_st',
+                                'g_nplc_s', 'g_nplc_st', 'autozero_mode'):
+                    self.assertNotIn(old_key, data)
+
+    def test_internal_segments_preserve_voltage_assignment(self):
+        instrument = FakeInstrument({':SYST:ERR?': '0,"No error"'})
+
+        def query(command):
+            if command == ':TRIG:STAT?':
+                return 'IDLE'
+            if command.startswith(':TRAC:ACT?'):
+                return '2'
+            if command.startswith(':TRAC:DATA?'):
+                return '1e-6,0.0,2e-6,0.01'
+            if command == ':SYST:ERR?':
+                return '0,"No error"'
+            raise OSError(command)
+
+        instrument.query = query
+        collector = InternalSegmentCollector(
+            instrument, queue.Queue(), threading.Event(), threading.Event(),
+            0.05,
+        )
+        try:
+            collector.acquire_segment(0.1, 0.001)
+            collector.acquire_segment(-0.2, 0.001)
+            times, voltages, currents = collector.read_all()
+            self.assertEqual(len(times), 4)
+            np.testing.assert_allclose(voltages, [0.1, 0.1, -0.2, -0.2])
+            np.testing.assert_allclose(currents, [1e-6, 2e-6, 1e-6, 2e-6])
+            self.assertGreaterEqual(times[2], times[1])
+            self.assertGreater(timing_metadata(times)['sample_rate_hz'], 0)
+            segments = collector.transition_metadata()
+            self.assertIsNone(segments[0]['transition_from_previous_s'])
+            self.assertGreaterEqual(
+                segments[1]['transition_from_previous_s'], 0.0
+            )
+        finally:
+            collector.cleanup()
+
+    def test_internal_segment_rejects_buffer_capacity_overflow(self):
+        collector = InternalSegmentCollector(
+            FakeInstrument(), queue.Queue(), threading.Event(),
+            threading.Event(), 0.05,
+        )
+        with self.assertRaisesRegex(ValueError, '单缓冲上限'):
+            collector.acquire_segment(0.1, 2000.0)
 
 
 class ConfigurationCompatibilityTests(unittest.TestCase):

@@ -264,27 +264,28 @@ class PlotRenderingTests(unittest.TestCase):
             svg = Path(outputs[0]).read_text(encoding='utf-8')
             self.assertIn('Current (nA)', svg)
 
-    def test_arbitrary_gate_five_columns_render_three_panels(self):
+    def test_arbitrary_gate_four_columns_render_two_panels(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / 'arbitrary_gate.txt'
             np.savetxt(
                 path,
                 np.array([
-                    [0.0, 0.1, 0.05, 1e-6, 1e-9],
-                    [1.0, -0.1, 0.05, 2e-6, 2e-9],
+                    [0.0, 0.1, 0.05, 1e-6],
+                    [1.0, -0.1, 0.05, 2e-6],
                 ]),
-                header='Time GateVoltage BiasVoltage BiasCurrent GateCurrent',
+                header='Time GateVoltage BiasVoltage BiasCurrent',
             )
             settings = default_plot_settings()
-            settings['modules']['arbitrary_gate']['formats'] = ['svg']
+            settings['modules']['arbitrary_gate']['formats'] = ['svg', 'pdf', 'png']
             outputs = render_result({
                 'run_id': 'gatecurrents',
                 'module_id': 'arbitrary_gate',
                 'status': 'complete',
                 'data_files': [str(path)],
             }, settings)
-            self.assertEqual(len(outputs), 1)
-            svg = Path(outputs[0]).read_text(encoding='utf-8')
+            self.assertEqual(len(outputs), 3)
+            svg_path = next(Path(item) for item in outputs if str(item).endswith('.svg'))
+            svg = svg_path.read_text(encoding='utf-8')
             self.assertIn('Gate voltage', svg)
             self.assertIn('I', svg)
             self.assertIn('sd', svg)
