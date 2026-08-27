@@ -49,6 +49,7 @@ from core.hardware_base import (
     verify_current_configuration,
     write_result_metadata,
 )
+from core.instrument_config import InstrumentSettings
 from core.utils import configure_pyqtgraph, G0
 
 
@@ -487,12 +488,16 @@ class IsdVgMeasurement:
 
 
 class IsdVgSetVsdWidget(BaseAppWidget):
-    def __init__(self, run_guard=None, parent=None):
+    def __init__(self, run_guard=None, instrument_settings=None, parent=None):
         configure_pyqtgraph(use_opengl=False)
         super().__init__(run_guard=run_guard, parent=parent)
 
         self.module_id = 'isd_vg_setvsd'
         self.module_name = '栅压特性扫描'
+        self.instrument_settings = instrument_settings or InstrumentSettings(
+            bias_address='GPIB0::1::INSTR',
+            gate_address='GPIB0::2::INSTR',
+        )
 
         self.ui_font = QFont('Arial', 12)
         self.ui_font.setWeight(QFont.Weight.Normal)
@@ -597,60 +602,6 @@ class IsdVgSetVsdWidget(BaseAppWidget):
         box_vbox = QVBoxLayout(scroll_content)
         box_vbox.setContentsMargins(0, 0, 0, 0)
         self.inputs = {}
-
-        addr_box = QGroupBox('仪器地址')
-        addr_box.setFont(self.bold_font)
-        addr_grid = QGridLayout(addr_box)
-        addr_grid.setColumnStretch(1, 1)
-        addr_grid.setColumnStretch(3, 1)
-        addr_grid.setHorizontalSpacing(10)
-
-        lbl_b_addr = QLabel('Bias 表地址:')
-        lbl_b_addr.setFont(self.ui_font)
-        addr_grid.addWidget(lbl_b_addr, 0, 0)
-        self.combo_bias = QComboBox()
-        self.combo_bias.setFont(self.ui_font)
-        self.combo_bias.setEditable(True)
-        self.combo_bias.addItem('GPIB0::1::INSTR')
-        self.inputs['BIAS_ADDR'] = self.combo_bias
-        addr_grid.addWidget(self.combo_bias, 0, 1)
-
-        lbl_g_addr = QLabel('Gate 表地址:')
-        lbl_g_addr.setFont(self.ui_font)
-        addr_grid.addWidget(lbl_g_addr, 0, 2)
-        self.combo_gate = QComboBox()
-        self.combo_gate.setFont(self.ui_font)
-        self.combo_gate.setEditable(True)
-        self.combo_gate.addItem('GPIB0::2::INSTR')
-        self.inputs['GATE_ADDR'] = self.combo_gate
-        addr_grid.addWidget(self.combo_gate, 0, 3)
-
-        lbl_b_term = QLabel('Bias 表端口:')
-        lbl_b_term.setFont(self.ui_font)
-        addr_grid.addWidget(lbl_b_term, 1, 0)
-        self.term_bias = QComboBox()
-        self.term_bias.setFont(self.ui_font)
-        self.term_bias.addItems(['REAR', 'FRONT'])
-        self.inputs['BIAS_TERM'] = self.term_bias
-        addr_grid.addWidget(self.term_bias, 1, 1)
-
-        lbl_g_term = QLabel('Gate 表端口:')
-        lbl_g_term.setFont(self.ui_font)
-        addr_grid.addWidget(lbl_g_term, 1, 2)
-        self.term_gate = QComboBox()
-        self.term_gate.setFont(self.ui_font)
-        self.term_gate.addItems(['REAR', 'FRONT'])
-        self.inputs['GATE_TERM'] = self.term_gate
-        addr_grid.addWidget(self.term_gate, 1, 3)
-
-        btn_scan = QPushButton('扫描设备')
-        btn_scan.setFont(self.bold_font)
-        btn_scan.setFixedSize(100, 30)
-        btn_scan.clicked.connect(self.scan_instruments)
-        addr_grid.addWidget(btn_scan, 2, 0, 1, 4,
-                            alignment=Qt.AlignmentFlag.AlignCenter)
-
-        box_vbox.addWidget(addr_box)
 
         bias_box = QGroupBox('偏压参数')
         bias_box.setFont(self.bold_font)
@@ -792,29 +743,6 @@ class IsdVgSetVsdWidget(BaseAppWidget):
 
         right_layout.addWidget(btn_area)
 
-    def scan_instruments(self):
-        self.log_info('正在扫描设备，请稍候...')
-        QApplication.processEvents()
-        try:
-            rm = pyvisa.ResourceManager()
-            res = rm.list_resources()
-            self.combo_bias.clear()
-            self.combo_gate.clear()
-            if res:
-                self.combo_bias.addItems(res)
-                self.combo_gate.addItems(res)
-                if len(res) >= 2:
-                    self.combo_gate.setCurrentIndex(1)
-                self.log_info(f"扫描完成，共找到 {len(res)} 个可用设备。")
-            else:
-                self.combo_bias.addItem('GPIB0::1::INSTR')
-                self.combo_gate.addItem('GPIB0::2::INSTR')
-                self.log_info('未找到可用设备。')
-        except Exception as exc:
-            self.combo_bias.addItem('GPIB0::1::INSTR')
-            self.combo_gate.addItem('GPIB0::2::INSTR')
-            self.log_info(f"设备扫描失败: {exc}")
-
     def browse_folder(self):
         folder = QFileDialog.getExistingDirectory(self, '选择保存文件夹')
         if folder:
@@ -838,10 +766,11 @@ class IsdVgSetVsdWidget(BaseAppWidget):
 
         preset = {}
         try:
-            preset['BIAS_ADDR'] = self.combo_bias.currentText().strip()
-            preset['GATE_ADDR'] = self.combo_gate.currentText().strip()
-            preset['BIAS_TERM'] = self.term_bias.currentText().strip()
-            preset['GATE_TERM'] = self.term_gate.currentText().strip()
+            instrument = self.instrument_settings.snapshot(require_gate=True)
+            preset['BIAS_ADDR'] = instrument['bias_address']
+            preset['GATE_ADDR'] = instrument['gate_address']
+            preset['BIAS_TERM'] = instrument['bias_terminal']
+            preset['GATE_TERM'] = instrument['gate_terminal']
 
             for key, entry in self.inputs.items():
                 if isinstance(entry, QComboBox):

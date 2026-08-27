@@ -1,9 +1,11 @@
 {
     "__schema_version__": 2,
+    "instruments": {
+        "bias": {"address": "GPIB1::4::INSTR", "terminal": "REAR"},
+        "gate": {"address": "GPIB1::18::INSTR", "terminal": "REAR"}
+    },
     "modules": {
     "break_junction": {
-        "RESOURCE_NAME": "GPIB1::4::INSTR",
-        "TERMINAL": "REAR",
         "V0": "0.01",
         "V_MAX": "10.0",
         "G_AIM_G0": "0.025",
@@ -21,10 +23,6 @@
         "__folder__": ""
     },
     "iv_curve": {
-          "address": "GPIB1::4::INSTR",
-          "terminal": "REAR",
-          "gate_address": "GPIB0::2::INSTR",
-          "gate_terminal": "REAR",
         "v_start": "0.02",
         "nplc": "1.0",
         "v_end": "-0.02",
@@ -48,7 +46,6 @@
             "mode": "single", "single_target": 0.0,
             "step_start": 0.0, "step_end": 1.0, "test_step": 0.2,
             "custom_text": "0, 0.5, 1.0",
-            "gate_address": "GPIB0::2::INSTR", "gate_terminal": "REAR",
             "gate_voltage_range": 20.0, "gate_nplc": 1.0,
             "gate_ilimit": 1e-9, "gate_leakage_limit": 1e-9,
             "gate_ramp_step": 0.1, "gate_step_delay": 0.5,
@@ -57,10 +54,6 @@
         "__folder__": ""
     },
     "isd_vg_setvsd": {
-        "BIAS_ADDR": "GPIB1::4::INSTR",
-        "GATE_ADDR": "GPIB1::18::INSTR",
-        "BIAS_TERM": "REAR",
-        "GATE_TERM": "REAR",
         "Bias_target": "0.002",
         "Bias_step": "0.001",
         "Bias_I_LIMIT": "1.05e-7",
@@ -78,10 +71,6 @@
         "__folder__": ""
     },
     "mapping_scan": {
-        "bias_addr": "GPIB1::4::INSTR",
-        "gate_addr": "GPIB1::18::INSTR",
-        "bias_term": "REAR",
-        "gate_term": "REAR",
         "vg_start": "-5",
         "vg_stop": "5",
         "vg_step": "0.05",
@@ -103,10 +92,6 @@
         "__folder__": ""
     },
     "it_step_setgate": {
-        "bias_address": "GPIB1::4::INSTR",
-        "gate_address": "GPIB1::18::INSTR",
-        "bias_terminal": "REAR",
-        "gate_terminal": "REAR",
         "meas_mode": "points",
         "num_points": "10000",
         "duration": "10.0",
@@ -162,10 +147,6 @@
         "__folder__": ""
     },
     "arbitrary_bias": {
-        "bias_address": "GPIB1::4::INSTR",
-        "gate_address": "GPIB1::18::INSTR",
-        "bias_terminal": "REAR",
-        "gate_terminal": "REAR",
         "cycles": "1",
         "switch_settle": "0.0",
         "b_nplc": "0.01",
@@ -186,10 +167,6 @@
         "__folder__": ""
     },
     "arbitrary_gate": {
-        "bias_address": "GPIB1::4::INSTR",
-        "gate_address": "GPIB1::18::INSTR",
-        "bias_terminal": "REAR",
-        "gate_terminal": "REAR",
         "cycles": "1",
         "switch_settle": "0.0",
         "g_nplc": "1.0",

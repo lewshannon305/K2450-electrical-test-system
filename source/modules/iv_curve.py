@@ -61,6 +61,7 @@ from core.hardware_base import (
     verify_current_configuration,
     write_result_metadata,
 )
+from core.instrument_config import InstrumentSettings
 from core.utils import G0, NoScrollComboBox, _0, _1, _2, _3, configure_pyqtgraph
 
 
@@ -76,8 +77,6 @@ def default_iv_gate_settings():
         'step_end': 1.0,
         'test_step': 0.2,
         'custom_text': '0, 0.5, 1.0',
-        'gate_address': 'GPIB0::2::INSTR',
-        'gate_terminal': 'REAR',
         'gate_voltage_range': 20.0,
         'gate_nplc': 1.0,
         'gate_ilimit': 1e-9,
@@ -992,10 +991,14 @@ class IV_Measurement:
 
 
 class IVWidget(BaseAppWidget):
-    def __init__(self, run_guard=None, parent=None):
+    def __init__(self, run_guard=None, instrument_settings=None, parent=None):
         super().__init__(run_guard, parent)
         self.module_id = 'iv_curve'
         self.module_name = '循环IV特性扫描'
+        self.instrument_settings = instrument_settings or InstrumentSettings(
+            bias_address='GPIB0::1::INSTR',
+            gate_address='GPIB0::2::INSTR',
+        )
         
         self.ui_font = QFont("Arial", 12)
         self.ui_font.setWeight(QFont.Weight.Normal)
@@ -1103,68 +1106,6 @@ class IVWidget(BaseAppWidget):
         scroll_content_layout = QVBoxLayout(scroll_content)
         scroll_content_layout.setContentsMargins(0, 0, 0, 0)
         self.inputs = {}
-
-        addr_group = QGroupBox("仪器地址")
-        addr_group.setFont(self.bold_font)
-        addr_grid = QGridLayout(addr_group)
-
-        lbl_addr = QLabel("Bias 表地址:")
-        lbl_addr.setFont(self.ui_font)
-
-        self.combo_addr = NoScrollComboBox()
-        self.combo_addr.setFont(self.ui_font)
-        self.combo_addr.setEditable(True)
-        self.combo_addr.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.combo_addr.addItem("GPIB0::1::INSTR")
-        self.inputs['address'] = self.combo_addr
-
-        lbl_gate_addr = QLabel("Gate 表地址:")
-        lbl_gate_addr.setFont(self.ui_font)
-        self.combo_gate_addr = NoScrollComboBox()
-        self.combo_gate_addr.setFont(self.ui_font)
-        self.combo_gate_addr.setEditable(True)
-        self.combo_gate_addr.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
-        )
-        self.combo_gate_addr.addItem("GPIB0::2::INSTR")
-        self.inputs['gate_address'] = self.combo_gate_addr
-
-        lbl_term = QLabel("Bias 表端口:")
-        lbl_term.setFont(self.ui_font)
-        self.combo_term = NoScrollComboBox()
-        self.combo_term.setFont(self.ui_font)
-        self.combo_term.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.combo_term.addItems(['REAR', 'FRONT'])
-        self.inputs['terminal'] = self.combo_term
-
-        lbl_gate_term = QLabel("Gate 表端口:")
-        lbl_gate_term.setFont(self.ui_font)
-        self.combo_gate_term = NoScrollComboBox()
-        self.combo_gate_term.setFont(self.ui_font)
-        self.combo_gate_term.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
-        )
-        self.combo_gate_term.addItems(['REAR', 'FRONT'])
-        self.inputs['gate_terminal'] = self.combo_gate_term
-
-        btn_scan = QPushButton("扫描设备")
-        btn_scan.setFont(self.bold_font)
-        btn_scan.setFixedSize(100, 30)
-        btn_scan.clicked.connect(self.scan_instruments)
-
-        addr_grid.addWidget(lbl_addr, 0, 0)
-        addr_grid.addWidget(self.combo_addr, 0, 1)
-        addr_grid.addWidget(lbl_gate_addr, 0, 2)
-        addr_grid.addWidget(self.combo_gate_addr, 0, 3)
-        addr_grid.addWidget(lbl_term, 1, 0)
-        addr_grid.addWidget(self.combo_term, 1, 1)
-        addr_grid.addWidget(lbl_gate_term, 1, 2)
-        addr_grid.addWidget(self.combo_gate_term, 1, 3)
-        addr_grid.addWidget(
-            btn_scan, 2, 0, 1, 4,
-            alignment=Qt.AlignmentFlag.AlignCenter
-        )
-        scroll_content_layout.addWidget(addr_group)
 
         self.cb_gate = QCheckBox('启用栅表（勾选展示栅压参数）')
         self.cb_gate.setFont(self.ui_font)
@@ -1414,10 +1355,8 @@ class IVWidget(BaseAppWidget):
     def current_gate_settings(self):
         settings = dict(default_iv_gate_settings())
         settings.update(self.gate_settings)
-        settings.update({
-            'gate_address': self.combo_gate_addr.currentText().strip(),
-            'gate_terminal': self.combo_gate_term.currentText(),
-        })
+        settings.pop('gate_address', None)
+        settings.pop('gate_terminal', None)
         for key in (
             'gate_voltage_range', 'gate_nplc', 'gate_ilimit',
             'gate_leakage_limit', 'gate_ramp_step', 'gate_step_delay',
@@ -1429,8 +1368,6 @@ class IVWidget(BaseAppWidget):
     def apply_gate_settings_to_main_controls(self):
         settings = dict(default_iv_gate_settings())
         settings.update(self.gate_settings)
-        self.combo_gate_addr.setCurrentText(str(settings['gate_address']))
-        self.combo_gate_term.setCurrentText(str(settings['gate_terminal']))
         for key in (
             'gate_voltage_range', 'gate_nplc', 'gate_ilimit',
             'gate_leakage_limit', 'gate_ramp_step', 'gate_step_delay',
@@ -1474,37 +1411,6 @@ class IVWidget(BaseAppWidget):
         self.log_text.clear()
     # -----------------------------------------------------------
 
-    def scan_instruments(self):
-        self.log_info("正在扫描设备，请稍候...")
-        QApplication.processEvents()
-        try:
-            rm = pyvisa.ResourceManager()
-            res = rm.list_resources()
-            bias_current = self.combo_addr.currentText()
-            gate_current = self.combo_gate_addr.currentText()
-            self.combo_addr.clear()
-            self.combo_gate_addr.clear()
-            if res:
-                self.combo_addr.addItems(res)
-                self.combo_gate_addr.addItems(res)
-                if bias_current in res:
-                    self.combo_addr.setCurrentText(bias_current)
-                if gate_current in res:
-                    self.combo_gate_addr.setCurrentText(gate_current)
-                elif len(res) > 1:
-                    self.combo_gate_addr.setCurrentIndex(1)
-                self.log_info(f"扫描完成，共找到 {len(res)} 个可用设备。")
-            else:
-                self.combo_addr.addItem("GPIB0::1::INSTR")
-                self.combo_gate_addr.addItem("GPIB0::2::INSTR")
-                self.log_info("未找到可用设备，已恢复默认地址。")
-        except Exception as e:
-            self.combo_addr.clear()
-            self.combo_gate_addr.clear()
-            self.combo_addr.addItem("GPIB0::1::INSTR")
-            self.combo_gate_addr.addItem("GPIB0::2::INSTR")
-            self.log_info(f"设备扫描失败: {e}")
-
     def start_measurement(self):
         if self.measure_running:
             return
@@ -1516,15 +1422,19 @@ class IVWidget(BaseAppWidget):
 
         try:
             p = {k: v.currentText().strip() if isinstance(v, QComboBox) else v.text().strip() for k, v in self.inputs.items()}
+            gate_enabled = self.cb_gate.isChecked()
+            instrument = self.instrument_settings.snapshot(
+                require_gate=gate_enabled
+            )
             params = {
-                'address': p['address'],
+                'address': instrument['bias_address'],
                 'v_start': float(p['v_start']),
                 'v_end': float(p['v_end']),
                 'v_step': float(p['v_step']),
                 'i_limit': float(p['i_limit']),
                 'settle_time': float(p['settle_time']),
                 'nplc': float(p['nplc']),
-                'terminal': p['terminal'],
+                'terminal': instrument['bias_terminal'],
                 'cycles': int(p['cycles'])
             }
             if params['v_step'] <= 0:
@@ -1548,9 +1458,11 @@ class IVWidget(BaseAppWidget):
             params['file_prefix'] = p['file_prefix']
             params['folder'] = self.folder_input.text().strip()
             validate_program_step_plan('iv', params)
-            params['gate_enabled'] = self.cb_gate.isChecked()
+            params['gate_enabled'] = gate_enabled
             if params['gate_enabled']:
                 gate = self.current_gate_settings()
+                gate['gate_address'] = instrument['gate_address']
+                gate['gate_terminal'] = instrument['gate_terminal']
                 gate_targets = build_gate_targets(gate)
                 validate_distinct_addresses(
                     params['address'], gate['gate_address'], True

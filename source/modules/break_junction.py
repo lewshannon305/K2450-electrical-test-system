@@ -46,6 +46,7 @@ from core.hardware_base import (
     verify_current_configuration,
     write_result_metadata,
 )
+from core.instrument_config import InstrumentSettings
 from core.utils import G0, NoScrollComboBox, _0, _1, _2, _3, configure_pyqtgraph
 
 
@@ -305,12 +306,15 @@ class BreakMeasurement:
 
 
 class BreakJunctionWidget(BaseAppWidget):
-    def __init__(self, run_guard=None, parent=None):
+    def __init__(self, run_guard=None, instrument_settings=None, parent=None):
         configure_pyqtgraph(use_opengl=True)
         super().__init__(run_guard=run_guard, parent=parent)
 
         self.module_id = 'break_junction'
         self.module_name = '断裂结'
+        self.instrument_settings = instrument_settings or InstrumentSettings(
+            bias_address='GPIB0::1::INSTR'
+        )
 
         self.ui_font = QFont('Arial', 12)
         self.ui_font.setWeight(QFont.Weight.Normal)
@@ -421,48 +425,6 @@ class BreakJunctionWidget(BaseAppWidget):
         self.preset_inputs = {}
         self.control_inputs = {}
         self.inputs = {}
-
-        addr_group = QGroupBox('仪器地址')
-        addr_group.setFont(self.bold_font)
-        addr_layout = QVBoxLayout(addr_group)
-        addr_layout.setContentsMargins(8, 8, 8, 8)
-        addr_layout.setSpacing(8)
-
-        addr_row = QHBoxLayout()
-        addr_row.setSpacing(10)
-
-        lbl_addr = QLabel('仪器地址:')
-        lbl_addr.setFont(self.ui_font)
-        self.combo_addr = NoScrollComboBox()
-        self.combo_addr.setFont(self.ui_font)
-        self.combo_addr.setEditable(True)
-        self.combo_addr.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.combo_addr.addItem('GPIB0::1::INSTR')
-        self.preset_inputs['RESOURCE_NAME'] = self.combo_addr
-
-        lbl_term = QLabel('测试端口:')
-        lbl_term.setFont(self.ui_font)
-        self.combo_term = NoScrollComboBox()
-        self.combo_term.setFont(self.ui_font)
-        self.combo_term.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.combo_term.addItems(['REAR', 'FRONT'])
-        self.preset_inputs['TERMINAL'] = self.combo_term
-
-        btn_scan = QPushButton('扫描设备')
-        btn_scan.setFont(self.bold_font)
-        btn_scan.setFixedSize(100, 30)
-        btn_scan.clicked.connect(self.scan_instruments)
-
-        addr_row.addWidget(lbl_addr)
-        addr_row.addWidget(self.combo_addr, 1)
-        addr_row.addWidget(lbl_term)
-        addr_row.addWidget(self.combo_term, 1)
-
-        addr_layout.addLayout(addr_row)
-        addr_layout.addWidget(btn_scan, alignment=Qt.AlignmentFlag.AlignCenter)
-        scroll_content_layout.addWidget(addr_group)
 
         preset_group = QGroupBox('预设参数 (启动后不可更改)')
         preset_group.setFont(self.bold_font)
@@ -624,24 +586,6 @@ class BreakJunctionWidget(BaseAppWidget):
 
         right_layout.addWidget(btn_area)
 
-    def scan_instruments(self):
-        self.log_info('正在扫描设备，请稍候...')
-        QApplication.processEvents()
-        try:
-            rm = pyvisa.ResourceManager()
-            res = rm.list_resources()
-            self.combo_addr.clear()
-            if res:
-                self.combo_addr.addItems(res)
-                self.log_info(f"扫描完成，共找到 {len(res)} 个可用设备。")
-            else:
-                self.combo_addr.addItem('GPIB0::1::INSTR')
-                self.log_info('未找到可用设备，已恢复默认地址。')
-        except Exception as exc:
-            self.combo_addr.clear()
-            self.combo_addr.addItem('GPIB0::1::INSTR')
-            self.log_info(f"设备扫描失败: {exc}")
-
     def browse_folder(self):
         folder = QFileDialog.getExistingDirectory(self, '选择保存文件夹')
         if folder:
@@ -684,6 +628,11 @@ class BreakJunctionWidget(BaseAppWidget):
 
         preset_params = {}
         try:
+            instrument = self.instrument_settings.snapshot(require_gate=False)
+            preset_params.update({
+                'RESOURCE_NAME': instrument['bias_address'],
+                'TERMINAL': instrument['bias_terminal'],
+            })
             for key, entry in self.preset_inputs.items():
                 val = entry.currentText().strip() if isinstance(
                     entry, NoScrollComboBox) else entry.text().strip()

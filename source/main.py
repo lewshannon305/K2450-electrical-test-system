@@ -4,6 +4,7 @@ import time
 
 import json
 import markdown
+import pyvisa
 from PyQt6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -24,12 +25,16 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QComboBox,
     QCheckBox,
-    QRadioButton
+    QRadioButton,
+    QGridLayout,
+    QSizePolicy,
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont, QFontMetrics
 
 from core.paths import readme_path
+from core.hardware_base import validate_2450_idn
+from core.instrument_config import InstrumentSettings, UNSELECTED_TEXT
 from modules.iv_curve import IVWidget
 from modules.isd_vg_setvsd import IsdVgSetVsdWidget
 from modules.break_junction import BreakJunctionWidget
@@ -83,8 +88,9 @@ class RunGuard:
 
 
 class WelcomePage(QWidget):
-    def __init__(self, parent=None):
+    def __init__(self, instrument_settings, parent=None):
         super().__init__(parent)
+        self.instrument_settings = instrument_settings
         layout = QHBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(20)
@@ -110,12 +116,13 @@ class WelcomePage(QWidget):
         title.setFont(title_font)
         title.setText(
             f"<div style='font-family: Arial; font-size:18pt; font-weight:700; line-height:{desired_line_px}px; text-align:center;'>"
-            "欢迎使用 Keithley2450 电学测试系统<br/>请在上方选择测试项目"
+            "欢迎使用 Keithley2450 电学测试系统"
             "</div>"
         )
 
         left_layout.addStretch()
         left_layout.addWidget(title)
+        left_layout.addWidget(self._build_instrument_group())
         left_layout.addStretch()
 
         right = QFrame()
@@ -134,7 +141,7 @@ class WelcomePage(QWidget):
         
         tips_html = (
             "<p style='margin: 10px 0; font-size: 12pt;'><b>1. 硬件连接：</b>请确保 Keithley 源表已通过 GPIB 妥善连接。</p>"
-            "<p style='margin: 10px 0; font-size: 12pt;'><b>2. 初始化：</b>进入任意测试模块后，请先点击“扫描设备”获取并确认仪器地址。</p>"
+            "<p style='margin: 10px 0; font-size: 12pt;'><b>2. 初始化：</b>请先在欢迎页点击“扫描设备”，选择并检测仪器连接。</p>"
             "<p style='margin: 10px 0; font-size: 12pt;'><b>3. 参数保存：</b>本系统支持“文件 -> 保存/加载配置”，可一键备份并恢复所有 7 个模块的测试参数。</p>"
             "<p style='margin: 10px 0; font-size: 12pt;'><b>4. 扫描顺序：</b>所有模块的步长输入均强制要求为正，扫描方向由起始终止电压的大小关系自动确定。</p>"
             "<p style='margin: 10px 0; font-size: 12pt;'><b>5. 极限性能警告：</b>高频采样时，请尽量避免后台高负载任务。</p>"
@@ -151,6 +158,248 @@ class WelcomePage(QWidget):
 
         layout.addWidget(left, stretch=1)
         layout.addWidget(right, stretch=1)
+
+    def _build_instrument_group(self):
+        group = QGroupBox('仪器选择')
+        bold_font = QFont('Arial', 12)
+        bold_font.setWeight(QFont.Weight.Bold)
+        ui_font = QFont('Arial', 12)
+        ui_font.setWeight(QFont.Weight.Normal)
+        group.setFont(bold_font)
+
+        grid = QGridLayout(group)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(2, 1)
+        grid.setHorizontalSpacing(10)
+
+        self.bias_address = QComboBox()
+        self.bias_address.setEditable(True)
+        self.bias_address.setFont(ui_font)
+        self.bias_address.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self.bias_terminal = QComboBox()
+        self.bias_terminal.addItems(['REAR', 'FRONT'])
+        self.bias_terminal.setFont(ui_font)
+
+        self.gate_address = QComboBox()
+        self.gate_address.setEditable(True)
+        self.gate_address.setFont(ui_font)
+        self.gate_address.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self.gate_terminal = QComboBox()
+        self.gate_terminal.addItems(['REAR', 'FRONT'])
+        self.gate_terminal.setFont(ui_font)
+
+        self.bias_status = QLabel('● 未选择')
+        self.gate_status = QLabel('● 未选择（可选）')
+        self.summary_status = QLabel('尚未选择仪器')
+        for label in (self.bias_status, self.gate_status, self.summary_status):
+            label.setFont(ui_font)
+
+        for row, text, address, terminal, status in (
+            (0, '偏压表:', self.bias_address, self.bias_terminal,
+             self.bias_status),
+            (1, '栅压表:', self.gate_address, self.gate_terminal,
+             self.gate_status),
+        ):
+            label = QLabel(text)
+            label.setFont(ui_font)
+            grid.addWidget(label, row, 0)
+            grid.addWidget(address, row, 1)
+            grid.addWidget(terminal, row, 2)
+            grid.addWidget(status, row, 3)
+
+        self.btn_scan = QPushButton('扫描设备')
+        self.btn_scan.setFont(bold_font)
+        self.btn_scan.setFixedSize(100, 30)
+        self.btn_scan.clicked.connect(self.scan_instruments)
+        self.btn_detect = QPushButton('检测连接')
+        self.btn_detect.setFont(bold_font)
+        self.btn_detect.setFixedSize(100, 30)
+        self.btn_detect.clicked.connect(self.detect_connections)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        buttons.addWidget(self.btn_scan)
+        buttons.addWidget(self.btn_detect)
+        buttons.addWidget(self.summary_status)
+        buttons.addStretch()
+        grid.addLayout(buttons, 2, 0, 1, 4)
+
+        self.bias_address.currentTextChanged.connect(self._selection_changed)
+        self.gate_address.currentTextChanged.connect(self._selection_changed)
+        self.bias_terminal.currentTextChanged.connect(self._selection_changed)
+        self.gate_terminal.currentTextChanged.connect(self._selection_changed)
+        self.set_settings(self.instrument_settings)
+        return group
+
+    @staticmethod
+    def _address_text(combo):
+        text = combo.currentText().strip()
+        return '' if text == UNSELECTED_TEXT else text
+
+    def _sync_settings(self):
+        self.instrument_settings.update(
+            self._address_text(self.bias_address),
+            self.bias_terminal.currentText(),
+            self._address_text(self.gate_address),
+            self.gate_terminal.currentText(),
+        )
+
+    def _selection_changed(self):
+        self._sync_settings()
+        bias_selected = bool(self.instrument_settings.bias_address)
+        gate_selected = bool(self.instrument_settings.gate_address)
+        self.bias_terminal.setEnabled(bias_selected)
+        self.gate_terminal.setEnabled(gate_selected)
+        self._set_status(
+            self.bias_status,
+            '未检测' if bias_selected else '未选择',
+            '#666666',
+        )
+        self._set_status(
+            self.gate_status,
+            '未检测' if gate_selected else '未选择（可选）',
+            '#666666',
+        )
+        self.summary_status.setText(
+            '请检测连接' if bias_selected else '尚未选择仪器'
+        )
+        self.summary_status.setStyleSheet('color: #666666;')
+
+    @staticmethod
+    def _set_status(label, text, color, tooltip=''):
+        label.setText(f'● {text}')
+        label.setStyleSheet(f'color: {color};')
+        label.setToolTip(tooltip)
+
+    @staticmethod
+    def _replace_combo_items(combo, resources, selected, fallback):
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem(UNSELECTED_TEXT)
+        combo.addItems(resources)
+        target = selected if selected in resources else fallback
+        combo.setCurrentText(target or UNSELECTED_TEXT)
+        combo.blockSignals(False)
+
+    def scan_instruments(self):
+        bias_current = self._address_text(self.bias_address)
+        gate_current = self._address_text(self.gate_address)
+        try:
+            rm = pyvisa.ResourceManager()
+            try:
+                resources = list(rm.list_resources())
+            finally:
+                close = getattr(rm, 'close', None)
+                if callable(close):
+                    close()
+        except Exception as exc:
+            self.summary_status.setText(f'设备扫描失败: {exc}')
+            self.summary_status.setStyleSheet('color: #AA0000;')
+            return
+
+        bias_fallback = resources[0] if resources else ''
+        gate_fallback = resources[1] if len(resources) > 1 else ''
+        self._replace_combo_items(
+            self.bias_address, resources, bias_current, bias_fallback
+        )
+        self._replace_combo_items(
+            self.gate_address, resources, gate_current, gate_fallback
+        )
+        self._selection_changed()
+        if not resources:
+            self.summary_status.setText('未扫描到可用仪器')
+
+    @staticmethod
+    def _detect_one(resource_manager, address):
+        instrument = resource_manager.open_resource(address)
+        try:
+            instrument.timeout = 3000
+            return validate_2450_idn(instrument.query('*IDN?'))
+        finally:
+            close = getattr(instrument, 'close', None)
+            if callable(close):
+                close()
+
+    def detect_connections(self):
+        self._sync_settings()
+        bias_ok = False
+        gate_ok = False
+        rm = None
+        try:
+            rm = pyvisa.ResourceManager()
+            if self.instrument_settings.bias_address:
+                try:
+                    self._detect_one(rm, self.instrument_settings.bias_address)
+                    bias_ok = True
+                    self._set_status(self.bias_status, '已连接', '#159A2E')
+                except Exception as exc:
+                    self._set_status(
+                        self.bias_status, '连接失败', '#AA0000', str(exc)
+                    )
+            else:
+                self._set_status(self.bias_status, '未选择', '#666666')
+
+            if self.instrument_settings.gate_address:
+                if (
+                    self.instrument_settings.gate_address.lower()
+                    == self.instrument_settings.bias_address.lower()
+                ):
+                    self._set_status(self.gate_status, '地址重复', '#AA0000')
+                else:
+                    try:
+                        self._detect_one(
+                            rm, self.instrument_settings.gate_address
+                        )
+                        gate_ok = True
+                        self._set_status(
+                            self.gate_status, '已连接', '#159A2E'
+                        )
+                    except Exception as exc:
+                        self._set_status(
+                            self.gate_status, '连接失败', '#AA0000', str(exc)
+                        )
+            else:
+                self._set_status(
+                    self.gate_status, '未选择（可选）', '#666666'
+                )
+        except Exception as exc:
+            self.summary_status.setText(f'连接检测失败: {exc}')
+            self.summary_status.setStyleSheet('color: #AA0000;')
+            return
+        finally:
+            if rm is not None:
+                close = getattr(rm, 'close', None)
+                if callable(close):
+                    close()
+
+        if bias_ok and gate_ok:
+            text, color = '两台 2450 已连接，可使用全部测试', '#159A2E'
+        elif bias_ok:
+            text, color = '已连接 1 台，可使用单表测试', '#159A2E'
+        else:
+            text, color = '偏压表未连接，暂时无法测试', '#AA0000'
+        self.summary_status.setText(text)
+        self.summary_status.setStyleSheet(f'color: {color};')
+
+    def set_settings(self, settings):
+        for combo, value in (
+            (self.bias_address, settings.bias_address),
+            (self.gate_address, settings.gate_address),
+        ):
+            combo.blockSignals(True)
+            if combo.findText(UNSELECTED_TEXT) < 0:
+                combo.addItem(UNSELECTED_TEXT)
+            if value and combo.findText(value) < 0:
+                combo.addItem(value)
+            combo.setCurrentText(value or UNSELECTED_TEXT)
+            combo.blockSignals(False)
+        self.bias_terminal.setCurrentText(settings.bias_terminal)
+        self.gate_terminal.setCurrentText(settings.gate_terminal)
+        self._selection_changed()
 
 
 class PlaceholderPage(QWidget):
@@ -172,6 +421,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Keithley 2450 电学测试系统")
 
         self.run_guard = RunGuard()
+        self.instrument_settings = InstrumentSettings()
         self.plot_settings = load_default_plot_settings(default_plot_settings())
         self.plot_manager = PlotManager(self.plot_settings, self)
         self.plot_manager.plot_finished.connect(self._on_plot_finished)
@@ -239,23 +489,45 @@ class MainWindow(QMainWindow):
             "任意栅压波形测试",
         ]
 
-        self.stack.addWidget(WelcomePage())
+        self.welcome_page = WelcomePage(self.instrument_settings)
+        self.stack.addWidget(self.welcome_page)
 
         for name in self.page_names[1:]:
             if name == "断裂结":
-                self.stack.addWidget(BreakJunctionWidget(run_guard=self.run_guard))
+                self.stack.addWidget(BreakJunctionWidget(
+                    run_guard=self.run_guard,
+                    instrument_settings=self.instrument_settings,
+                ))
             elif name == "循环IV特性扫描":
-                self.stack.addWidget(IVWidget(run_guard=self.run_guard))
+                self.stack.addWidget(IVWidget(
+                    run_guard=self.run_guard,
+                    instrument_settings=self.instrument_settings,
+                ))
             elif name == "栅压特性扫描":
-                self.stack.addWidget(IsdVgSetVsdWidget(run_guard=self.run_guard))
+                self.stack.addWidget(IsdVgSetVsdWidget(
+                    run_guard=self.run_guard,
+                    instrument_settings=self.instrument_settings,
+                ))
             elif name == "二维Mapping扫描":
-                self.stack.addWidget(MappingWidget(run_guard=self.run_guard))
+                self.stack.addWidget(MappingWidget(
+                    run_guard=self.run_guard,
+                    instrument_settings=self.instrument_settings,
+                ))
             elif name == "It特性扫描":
-                self.stack.addWidget(ItStepWidget(run_guard=self.run_guard))
+                self.stack.addWidget(ItStepWidget(
+                    run_guard=self.run_guard,
+                    instrument_settings=self.instrument_settings,
+                ))
             elif name == "任意偏压波形测试":
-                self.stack.addWidget(ArbitraryBiasWidget(run_guard=self.run_guard))
+                self.stack.addWidget(ArbitraryBiasWidget(
+                    run_guard=self.run_guard,
+                    instrument_settings=self.instrument_settings,
+                ))
             elif name == "任意栅压波形测试":
-                self.stack.addWidget(ArbitraryGateWidget(run_guard=self.run_guard))
+                self.stack.addWidget(ArbitraryGateWidget(
+                    run_guard=self.run_guard,
+                    instrument_settings=self.instrument_settings,
+                ))
             else:
                 self.stack.addWidget(PlaceholderPage(name))
 
@@ -344,6 +616,7 @@ class MainWindow(QMainWindow):
 
             config_data = {
                 '__schema_version__': 2,
+                'instruments': self.instrument_settings.to_config(),
                 'modules': {},
                 'plotting': self.plot_settings,
             }
@@ -405,6 +678,11 @@ class MainWindow(QMainWindow):
                 config_data = json.load(f)
 
             schema_version, module_data = parse_config_modules(config_data)
+
+            self.instrument_settings.load_config(
+                config_data.get('instruments', {})
+            )
+            self.welcome_page.set_settings(self.instrument_settings)
 
             for i in range(1, self.stack.count()):
                 widget = self.stack.widget(i)

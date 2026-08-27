@@ -53,6 +53,7 @@ from core.hardware_base import (
     verify_current_configuration,
     write_result_metadata,
 )
+from core.instrument_config import InstrumentSettings
 from core.utils import (
     NoScrollComboBox,
     _0, _1, _2, _3, _4, _5, _6, _7, _8,
@@ -977,12 +978,16 @@ class ItMeasurement:
 
 
 class ItStepWidget(BaseAppWidget):
-    def __init__(self, run_guard=None, parent=None):
+    def __init__(self, run_guard=None, instrument_settings=None, parent=None):
         configure_pyqtgraph(use_opengl=False)
         super().__init__(run_guard=run_guard, parent=parent)
 
         self.module_id = 'it_step_setgate'
         self.module_name = 'It特性扫描'
+        self.instrument_settings = instrument_settings or InstrumentSettings(
+            bias_address='GPIB0::1::INSTR',
+            gate_address='GPIB0::2::INSTR',
+        )
 
         self.ui_font = QFont('Arial', 12)
         self.ui_font.setWeight(QFont.Weight.Normal)
@@ -1075,64 +1080,6 @@ class ItStepWidget(BaseAppWidget):
         box_vbox = QVBoxLayout(scroll_content)
         box_vbox.setContentsMargins(0, 0, 0, 0)
         self.inputs = {}
-
-        addr_box = QGroupBox('仪器地址')
-        addr_box.setFont(self.bold_font)
-        addr_grid = QGridLayout(addr_box)
-        addr_grid.setColumnStretch(1, 1)
-        addr_grid.setColumnStretch(3, 1)
-        addr_grid.setHorizontalSpacing(10)
-
-        lbl_baddr = QLabel('Bias 表地址:')
-        lbl_baddr.setFont(self.ui_font)
-        lbl_baddr.setStyleSheet('font-weight: normal;')
-        addr_grid.addWidget(lbl_baddr, 0, 0)
-        self.inputs['bias_address'] = NoScrollComboBox()
-        self.inputs['bias_address'].setEditable(True)
-        self.inputs['bias_address'].addItem('GPIB0::1::INSTR')
-        self.inputs['bias_address'].setFont(self.ui_font)
-        self.inputs['bias_address'].setStyleSheet('font-weight: normal;')
-        addr_grid.addWidget(self.inputs['bias_address'], 0, 1)
-
-        lbl_gaddr = QLabel('Gate 表地址:')
-        lbl_gaddr.setFont(self.ui_font)
-        lbl_gaddr.setStyleSheet('font-weight: normal;')
-        addr_grid.addWidget(lbl_gaddr, 0, 2)
-        self.inputs['gate_address'] = NoScrollComboBox()
-        self.inputs['gate_address'].setEditable(True)
-        self.inputs['gate_address'].addItem('GPIB0::2::INSTR')
-        self.inputs['gate_address'].setFont(self.ui_font)
-        self.inputs['gate_address'].setStyleSheet('font-weight: normal;')
-        addr_grid.addWidget(self.inputs['gate_address'], 0, 3)
-
-        lbl_bterm = QLabel('Bias 表端口:')
-        lbl_bterm.setFont(self.ui_font)
-        lbl_bterm.setStyleSheet('font-weight: normal;')
-        addr_grid.addWidget(lbl_bterm, 1, 0)
-        self.inputs['bias_terminal'] = NoScrollComboBox()
-        self.inputs['bias_terminal'].addItems(['REAR', 'FRONT'])
-        self.inputs['bias_terminal'].setFont(self.ui_font)
-        self.inputs['bias_terminal'].setStyleSheet('font-weight: normal;')
-        addr_grid.addWidget(self.inputs['bias_terminal'], 1, 1)
-
-        lbl_gterm = QLabel('Gate 表端口:')
-        lbl_gterm.setFont(self.ui_font)
-        lbl_gterm.setStyleSheet('font-weight: normal;')
-        addr_grid.addWidget(lbl_gterm, 1, 2)
-        self.inputs['gate_terminal'] = NoScrollComboBox()
-        self.inputs['gate_terminal'].addItems(['REAR', 'FRONT'])
-        self.inputs['gate_terminal'].setFont(self.ui_font)
-        self.inputs['gate_terminal'].setStyleSheet('font-weight: normal;')
-        addr_grid.addWidget(self.inputs['gate_terminal'], 1, 3)
-
-        btn_scan = QPushButton('扫描设备')
-        btn_scan.setFont(self.bold_font)
-        btn_scan.setFixedSize(100, 30)
-        btn_scan.clicked.connect(self.scan_instruments)
-        btn_scan.setStyleSheet('font-weight: normal;')
-        addr_grid.addWidget(btn_scan, 2, 0, 1, 4,
-                            alignment=Qt.AlignmentFlag.AlignCenter)
-        box_vbox.addWidget(addr_box)
 
         meas_box = QGroupBox('测量设置')
         meas_box.setFont(self.bold_font)
@@ -1455,25 +1402,6 @@ class ItStepWidget(BaseAppWidget):
         self.wg_b_single.setVisible(is_single)
         self.wg_b_step.setVisible(not is_single)
 
-    def scan_instruments(self):
-        self.log_info('扫描设备中...')
-        QApplication.processEvents()
-        try:
-            rm = pyvisa.ResourceManager()
-            res = rm.list_resources()
-            self.inputs['bias_address'].clear()
-            self.inputs['gate_address'].clear()
-            if res:
-                self.inputs['bias_address'].addItems(res)
-                self.inputs['gate_address'].addItems(res)
-                if len(res) >= 2:
-                    self.inputs['gate_address'].setCurrentIndex(1)
-                self.log_info(f"找到 {len(res)} 个设备。")
-            else:
-                self.log_info('未找到设备。')
-        except Exception as exc:
-            self.log_info(f"扫描失败: {exc}")
-
     def browse_folder(self):
         directory = QFileDialog.getExistingDirectory(self, '选择保存文件夹')
         if directory:
@@ -1503,8 +1431,12 @@ class ItStepWidget(BaseAppWidget):
                 else:
                     p[key] = widget.text().strip()
 
+            gate_enabled = self.cb_gate.isChecked()
+            instrument = self.instrument_settings.snapshot(
+                require_gate=gate_enabled
+            )
             preset = {
-                'gate_enabled': self.cb_gate.isChecked(),
+                'gate_enabled': gate_enabled,
                 'meas_mode': p['meas_mode'],
                 'num_points': float(p['num_points']),
                 'duration': float(p['duration']),
@@ -1515,10 +1447,10 @@ class ItStepWidget(BaseAppWidget):
                 'line_frequency': float(p['line_frequency']),
                 'line_search_hz': float(p['line_search_hz']),
                 'max_odd_harmonic': int(p['max_odd_harmonic']),
-                'bias_address': p['bias_address'],
-                'gate_address': p['gate_address'],
-                'bias_terminal': p['bias_terminal'],
-                'gate_terminal': p['gate_terminal'],
+                'bias_address': instrument['bias_address'],
+                'gate_address': instrument['gate_address'],
+                'bias_terminal': instrument['bias_terminal'],
+                'gate_terminal': instrument['gate_terminal'],
                 'prefix': p['filename_prefix'],
             }
 

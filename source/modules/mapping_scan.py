@@ -48,6 +48,7 @@ from core.hardware_base import (
     verify_current_configuration,
     write_result_metadata,
 )
+from core.instrument_config import InstrumentSettings
 from core.utils import NoScrollComboBox, G0, _0, _1, configure_pyqtgraph
 
 class MappingMeasurement:
@@ -642,12 +643,16 @@ class MappingMeasurement:
 
 
 class MappingWidget(BaseAppWidget):
-    def __init__(self, run_guard=None, parent=None):
+    def __init__(self, run_guard=None, instrument_settings=None, parent=None):
         configure_pyqtgraph(use_opengl=True)
         super().__init__(run_guard=run_guard, parent=parent)
 
         self.module_id = 'mapping_scan'
         self.module_name = '二维Mapping扫描'
+        self.instrument_settings = instrument_settings or InstrumentSettings(
+            bias_address='GPIB0::1::INSTR',
+            gate_address='GPIB0::2::INSTR',
+        )
 
         self.ui_font = QFont('Arial', 12)
         self.ui_font.setWeight(QFont.Weight.Normal)
@@ -746,67 +751,6 @@ class MappingWidget(BaseAppWidget):
         box_vbox = QVBoxLayout(scroll_content)
         box_vbox.setContentsMargins(0, 0, 0, 0)
         self.inputs = {}
-
-        addr_box = QGroupBox('仪器地址')
-        addr_box.setFont(self.bold_font)
-        addr_grid = QGridLayout(addr_box)
-        addr_grid.setColumnStretch(1, 1)
-        addr_grid.setColumnStretch(3, 1)
-        addr_grid.setHorizontalSpacing(10)
-
-        lbl_ba = QLabel('Bias 表地址:')
-        lbl_ba.setFont(self.ui_font)
-        addr_grid.addWidget(lbl_ba, 0, 0)
-        self.c_b_addr = NoScrollComboBox()
-        self.c_b_addr.setFont(self.ui_font)
-        self.c_b_addr.setEditable(True)
-        self.c_b_addr.addItem('GPIB0::1::INSTR')
-        self.c_b_addr.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.inputs['bias_addr'] = self.c_b_addr
-        addr_grid.addWidget(self.c_b_addr, 0, 1)
-
-        lbl_ga = QLabel('Gate 表地址:')
-        lbl_ga.setFont(self.ui_font)
-        addr_grid.addWidget(lbl_ga, 0, 2)
-        self.c_g_addr = NoScrollComboBox()
-        self.c_g_addr.setFont(self.ui_font)
-        self.c_g_addr.setEditable(True)
-        self.c_g_addr.addItem('GPIB0::2::INSTR')
-        self.c_g_addr.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.inputs['gate_addr'] = self.c_g_addr
-        addr_grid.addWidget(self.c_g_addr, 0, 3)
-
-        lbl_bt = QLabel('Bias 表端口:')
-        lbl_bt.setFont(self.ui_font)
-        addr_grid.addWidget(lbl_bt, 1, 0)
-        self.c_b_term = NoScrollComboBox()
-        self.c_b_term.setFont(self.ui_font)
-        self.c_b_term.addItems(['REAR', 'FRONT'])
-        self.c_b_term.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.inputs['bias_term'] = self.c_b_term
-        addr_grid.addWidget(self.c_b_term, 1, 1)
-
-        lbl_gt = QLabel('Gate 表端口:')
-        lbl_gt.setFont(self.ui_font)
-        addr_grid.addWidget(lbl_gt, 1, 2)
-        self.c_g_term = NoScrollComboBox()
-        self.c_g_term.setFont(self.ui_font)
-        self.c_g_term.addItems(['REAR', 'FRONT'])
-        self.c_g_term.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.inputs['gate_term'] = self.c_g_term
-        addr_grid.addWidget(self.c_g_term, 1, 3)
-
-        btn_scan = QPushButton('扫描设备')
-        btn_scan.setFont(self.bold_font)
-        btn_scan.setFixedSize(100, 30)
-        btn_scan.clicked.connect(self.scan_instruments)
-        addr_grid.addWidget(btn_scan, 2, 0, 1, 4,
-                            alignment=Qt.AlignmentFlag.AlignCenter)
-        box_vbox.addWidget(addr_box)
 
         gate_box = QGroupBox('栅压参数')
         gate_box.setFont(self.bold_font)
@@ -950,25 +894,6 @@ class MappingWidget(BaseAppWidget):
         btn_hbox.addWidget(self.btn_force)
         right_layout.addWidget(btn_area)
 
-    def scan_instruments(self):
-        self.log_info('扫描设备中...')
-        QApplication.processEvents()
-        try:
-            rm = pyvisa.ResourceManager()
-            res = rm.list_resources()
-            self.c_b_addr.clear()
-            self.c_g_addr.clear()
-            if res:
-                self.c_b_addr.addItems(res)
-                self.c_g_addr.addItems(res)
-                if len(res) >= 2:
-                    self.c_g_addr.setCurrentIndex(1)
-                self.log_info(f"扫描完成，找到 {len(res)} 个设备。")
-            else:
-                self.log_info('未找到设备。')
-        except Exception as exc:
-            self.log_info(f"扫描失败: {exc}")
-
     def browse_folder(self):
         directory = QFileDialog.getExistingDirectory(self, '选择保存文件夹')
         if directory:
@@ -992,6 +917,13 @@ class MappingWidget(BaseAppWidget):
 
         preset = {}
         try:
+            instrument = self.instrument_settings.snapshot(require_gate=True)
+            preset.update({
+                'bias_addr': instrument['bias_address'],
+                'gate_addr': instrument['gate_address'],
+                'bias_term': instrument['bias_terminal'],
+                'gate_term': instrument['gate_terminal'],
+            })
             for key, widget in self.inputs.items():
                 if isinstance(widget, NoScrollComboBox):
                     preset[key] = widget.currentText().strip()

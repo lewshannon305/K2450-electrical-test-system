@@ -1,4 +1,5 @@
 import json
+import os
 import queue
 import tempfile
 import threading
@@ -7,7 +8,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+
 import numpy as np
+from PyQt6.QtWidgets import QApplication
 
 from core.hardware_base import (
     InstrumentConfigurationError,
@@ -48,8 +52,9 @@ from modules.mapping_scan import MappingMeasurement
 from modules.break_junction import BreakMeasurement
 from modules.arbitrary_bias import ArbMeasurement
 from modules.arbitrary_gate import ArbitraryGateWidget, GateArbMeasurement
-from main import parse_config_modules
+from main import MainWindow, WelcomePage, parse_config_modules
 from core.app_base import BaseAppWidget
+from core.instrument_config import InstrumentSettings
 
 
 class FakeInstrument:
@@ -164,6 +169,174 @@ class HardwareReliabilityTests(unittest.TestCase):
         self.assertEqual(validate_nplc(0.01), 0.01)
         with self.assertRaises(ValueError):
             validate_nplc(0.001)
+
+
+class FakeResourceManager:
+    def __init__(self, resources=(), instruments=None):
+        self.resources = tuple(resources)
+        self.instruments = dict(instruments or {})
+        self.closed = False
+
+    def list_resources(self):
+        return self.resources
+
+    def open_resource(self, address):
+        value = self.instruments[address]
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    def close(self):
+        self.closed = True
+
+
+class GlobalInstrumentSelectionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_single_and_dual_meter_requirements(self):
+        settings = InstrumentSettings(
+            bias_address='GPIB0::1::INSTR',
+            bias_terminal='REAR',
+        )
+        self.assertEqual(
+            settings.snapshot(require_gate=False)['bias_address'],
+            'GPIB0::1::INSTR',
+        )
+        with self.assertRaisesRegex(ValueError, '目前仅检测到 1 台'):
+            settings.snapshot(require_gate=True)
+
+        settings.gate_address = 'GPIB0::2::INSTR'
+        self.assertEqual(
+            settings.snapshot(require_gate=True)['gate_address'],
+            'GPIB0::2::INSTR',
+        )
+        settings.gate_address = 'gpib0::1::instr'
+        with self.assertRaises(ValueError):
+            settings.snapshot(require_gate=True)
+
+    def test_scan_zero_one_and_two_resources(self):
+        settings = InstrumentSettings()
+        page = WelcomePage(settings)
+
+        with patch('main.pyvisa.ResourceManager', return_value=FakeResourceManager()):
+            page.scan_instruments()
+        self.assertEqual(settings.bias_address, '')
+        self.assertEqual(settings.gate_address, '')
+        self.assertEqual(page.summary_status.text(), '未扫描到可用仪器')
+
+        one = 'GPIB0::8::INSTR'
+        with patch(
+            'main.pyvisa.ResourceManager',
+            return_value=FakeResourceManager([one]),
+        ):
+            page.scan_instruments()
+        self.assertEqual(settings.bias_address, one)
+        self.assertEqual(settings.gate_address, '')
+
+        two = 'GPIB0::9::INSTR'
+        with patch(
+            'main.pyvisa.ResourceManager',
+            return_value=FakeResourceManager([one, two]),
+        ):
+            page.scan_instruments()
+        self.assertEqual(settings.bias_address, one)
+        self.assertEqual(settings.gate_address, two)
+
+    def test_detection_statuses_for_one_two_and_failed_meter(self):
+        idn = 'KEITHLEY INSTRUMENTS,MODEL 2450,1,1'
+        bias = 'GPIB0::1::INSTR'
+        gate = 'GPIB0::2::INSTR'
+        settings = InstrumentSettings(bias_address=bias)
+        page = WelcomePage(settings)
+        one_rm = FakeResourceManager(
+            [bias], {bias: FakeInstrument({'*IDN?': idn})}
+        )
+        with patch('main.pyvisa.ResourceManager', return_value=one_rm):
+            page.detect_connections()
+        self.assertEqual(
+            page.summary_status.text(), '已连接 1 台，可使用单表测试'
+        )
+
+        settings.gate_address = gate
+        page.set_settings(settings)
+        two_rm = FakeResourceManager(
+            [bias, gate],
+            {
+                bias: FakeInstrument({'*IDN?': idn}),
+                gate: FakeInstrument({'*IDN?': idn}),
+            },
+        )
+        with patch('main.pyvisa.ResourceManager', return_value=two_rm):
+            page.detect_connections()
+        self.assertEqual(
+            page.summary_status.text(), '两台 2450 已连接，可使用全部测试'
+        )
+
+        bad_rm = FakeResourceManager(
+            [bias, gate],
+            {
+                bias: FakeInstrument({'*IDN?': idn}),
+                gate: FakeInstrument({'*IDN?': OSError('read failed')}),
+            },
+        )
+        with patch('main.pyvisa.ResourceManager', return_value=bad_rm):
+            page.detect_connections()
+        self.assertIn('连接失败', page.gate_status.text())
+        self.assertEqual(
+            page.summary_status.text(), '已连接 1 台，可使用单表测试'
+        )
+
+    def test_main_window_shares_one_configuration_without_address_inputs(self):
+        window = MainWindow()
+        try:
+            widgets = window._measurement_widgets()
+            self.assertEqual(len(widgets), 7)
+            for widget in widgets:
+                self.assertIs(
+                    widget.instrument_settings, window.instrument_settings
+                )
+                self.assertFalse({
+                    'RESOURCE_NAME', 'TERMINAL', 'address', 'terminal',
+                    'BIAS_ADDR', 'GATE_ADDR', 'BIAS_TERM', 'GATE_TERM',
+                    'bias_addr', 'gate_addr', 'bias_term', 'gate_term',
+                    'bias_address', 'gate_address',
+                    'bias_terminal', 'gate_terminal',
+                } & set(widget.inputs))
+            self.assertEqual(
+                [action.text() for action in window.menuBar().actions()],
+                ['文件', '测量', '绘图', '帮助'],
+            )
+            self.assertEqual(
+                [window.nav_group.button(i).text() for i in range(8)],
+                [
+                    '欢迎', '断裂结', '循环IV特性扫描', '栅压特性扫描',
+                    '二维Mapping扫描', 'It特性扫描',
+                    '任意偏压波形测试', '任意栅压波形测试',
+                ],
+            )
+        finally:
+            window.close()
+
+    def test_bundled_configs_use_only_global_instrument_section(self):
+        forbidden = {
+            'RESOURCE_NAME', 'TERMINAL', 'address', 'terminal',
+            'BIAS_ADDR', 'GATE_ADDR', 'BIAS_TERM', 'GATE_TERM',
+            'bias_addr', 'gate_addr', 'bias_term', 'gate_term',
+            'bias_address', 'gate_address',
+            'bias_terminal', 'gate_terminal',
+        }
+        config_dir = Path(__file__).resolve().parents[2] / 'configs'
+        for path in config_dir.glob('*.json'):
+            if path.name == 'plotting_default.json':
+                continue
+            value = json.loads(path.read_text(encoding='utf-8'))
+            self.assertIn('instruments', value, path.name)
+            for module in value['modules'].values():
+                self.assertFalse(forbidden & set(module), path.name)
+                gate_settings = module.get('__gate_settings__', {})
+                self.assertFalse(forbidden & set(gate_settings), path.name)
 
 
 class FastZeroingTests(unittest.TestCase):
