@@ -494,7 +494,7 @@ class GateArbMeasurement:
                 ('log', f'安全归零失败，已执行紧急关断：{exc}'))
 
     def run(self):
-        times, v_outs, i_outs = [], [], []
+        times, v_outs, isd_outs, ig_outs = [], [], [], []
         vb = self.params['b_target']
         try:
             self.connect()
@@ -522,7 +522,10 @@ class GateArbMeasurement:
                     return
                 warmup_started = time.perf_counter()
                 required_float_query(
-                    self.bias_k, ':READ?', '任意栅压预热读数'
+                    self.bias_k, ':READ?', '任意栅压预热偏压电流读数'
+                )
+                required_float_query(
+                    self.gate_k, ':READ?', '任意栅压预热栅电流读数'
                 )
                 warmup_read_times.append(
                     time.perf_counter() - warmup_started
@@ -533,7 +536,7 @@ class GateArbMeasurement:
             p_settle = self.params['switch_settle']
             cycles = int(self.params['cycles'])
             plot_interval = self.params['plot_interval']
-            batch_t, batch_v, batch_i = [], [], []
+            batch_t, batch_v, batch_isd, batch_ig = [], [], [], []
 
             T_start = time.perf_counter()
             est_read_time = max(
@@ -565,8 +568,11 @@ class GateArbMeasurement:
                             break
 
                         t0 = time.perf_counter()
-                        reading = required_float_query(
+                        isd = required_float_query(
                             self.bias_k, ':READ?', '任意栅压正式偏压电流读数'
+                        )
+                        ig = required_float_query(
+                            self.gate_k, ':READ?', '任意栅压正式栅电流读数'
                         )
                         t1 = time.perf_counter()
 
@@ -576,15 +582,18 @@ class GateArbMeasurement:
                         rel_time = (t0 + t1) / 2 - T_start
                         times.append(rel_time)
                         v_outs.append(target_g)
-                        i_outs.append(reading)
+                        isd_outs.append(isd)
+                        ig_outs.append(ig)
                         batch_t.append(rel_time)
                         batch_v.append(target_g)
-                        batch_i.append(reading)
+                        batch_isd.append(isd)
+                        batch_ig.append(ig)
 
                         if len(batch_t) >= plot_interval:
                             self.update_queue.put(
-                                ('data_batch', vb, batch_t, batch_v, batch_i, cycle, cycles))
-                            batch_t, batch_v, batch_i = [], [], []
+                                ('data_batch', vb, batch_t, batch_v,
+                                 batch_isd, batch_ig, cycle, cycles))
+                            batch_t, batch_v, batch_isd, batch_ig = [], [], [], []
 
                     while time.perf_counter() < absolute_deadline:
                         if self.stop_event.is_set() or self.force_stop_event.is_set():
@@ -597,7 +606,8 @@ class GateArbMeasurement:
 
             if batch_t:
                 self.update_queue.put(
-                    ('data_batch', vb, batch_t, batch_v, batch_i, cycles, cycles))
+                    ('data_batch', vb, batch_t, batch_v,
+                     batch_isd, batch_ig, cycles, cycles))
 
             fname = self.params['filename']
             result_status = (
@@ -606,7 +616,7 @@ class GateArbMeasurement:
                 else 'complete'
             )
             self.update_queue.put(
-                ('block_done', vb, times, v_outs, i_outs,
+                ('block_done', vb, times, v_outs, isd_outs, ig_outs,
                  fname, result_status,
                  None if result_status == 'complete' else '用户停止或强制终止'))
 
@@ -614,7 +624,7 @@ class GateArbMeasurement:
             self.update_queue.put(('log', f"测量中断或出错: {e}"))
             if times:
                 self.update_queue.put((
-                    'block_done', vb, times, v_outs, i_outs,
+                    'block_done', vb, times, v_outs, isd_outs, ig_outs,
                     self.params['filename'], 'partial', e,
                 ))
         finally:
@@ -666,7 +676,8 @@ class ArbitraryGateWidget(BaseAppWidget):
         self.data_count = 0
         self.time_data = np.zeros(self.capacity)
         self.v_data = np.zeros(self.capacity)
-        self.i_data = np.zeros(self.capacity)
+        self.isd_data = np.zeros(self.capacity)
+        self.ig_data = np.zeros(self.capacity)
         self.points_changed = False
 
         self.current_folder = ""
@@ -698,18 +709,33 @@ class ArbitraryGateWidget(BaseAppWidget):
 
         self.graph_widget.nextRow()
 
-        self.plot_i = self.graph_widget.addPlot(
+        self.plot_isd = self.graph_widget.addPlot(
             title="Bias Current vs Time")
-        self.plot_i.setLabel('left', text='Bias Current',
+        self.plot_isd.setLabel('left', text='Bias Current',
                              units='A', **label_style)
-        self.plot_i.setLabel('bottom', text='Time', units='s', **label_style)
-        self.plot_i.getAxis('left').setTickFont(self.ui_font)
-        self.plot_i.getAxis('bottom').setTickFont(self.ui_font)
-        self.plot_i.showGrid(x=True, y=True, alpha=0.3)
-        self.plot_i.setDownsampling(auto=True, mode='peak')
-        self.plot_i.setClipToView(True)
-        self.curve_i = self.plot_i.plot(pen=pg.mkPen('b', width=1.5))
-        self.plot_i.setXLink(self.plot_v)
+        self.plot_isd.setLabel('bottom', text='Time', units='s', **label_style)
+        self.plot_isd.getAxis('left').setTickFont(self.ui_font)
+        self.plot_isd.getAxis('bottom').setTickFont(self.ui_font)
+        self.plot_isd.showGrid(x=True, y=True, alpha=0.3)
+        self.plot_isd.setDownsampling(auto=True, mode='peak')
+        self.plot_isd.setClipToView(True)
+        self.curve_isd = self.plot_isd.plot(pen=pg.mkPen('b', width=1.5))
+        self.plot_isd.setXLink(self.plot_v)
+
+        self.graph_widget.nextRow()
+
+        self.plot_ig = self.graph_widget.addPlot(
+            title="Gate Current vs Time")
+        self.plot_ig.setLabel('left', text='Gate Current',
+                              units='A', **label_style)
+        self.plot_ig.setLabel('bottom', text='Time', units='s', **label_style)
+        self.plot_ig.getAxis('left').setTickFont(self.ui_font)
+        self.plot_ig.getAxis('bottom').setTickFont(self.ui_font)
+        self.plot_ig.showGrid(x=True, y=True, alpha=0.3)
+        self.plot_ig.setDownsampling(auto=True, mode='peak')
+        self.plot_ig.setClipToView(True)
+        self.curve_ig = self.plot_ig.plot(pen=pg.mkPen('g', width=1.5))
+        self.plot_ig.setXLink(self.plot_v)
 
         right_layout = QVBoxLayout()
         main_layout.addLayout(right_layout, stretch=2)
@@ -1082,9 +1108,11 @@ class ArbitraryGateWidget(BaseAppWidget):
         self.data_count = 0
         self.time_data.fill(0)
         self.v_data.fill(0)
-        self.i_data.fill(0)
+        self.isd_data.fill(0)
+        self.ig_data.fill(0)
         self.curve_v.setData([], [])
-        self.curve_i.setData([], [])
+        self.curve_isd.setData([], [])
+        self.curve_ig.setData([], [])
 
         while not self.update_queue.empty():
             self.update_queue.get()
@@ -1176,12 +1204,13 @@ class ArbitraryGateWidget(BaseAppWidget):
                 self.status_labels['gate_i'].setText(f"{msg[_1]:.6e}")
 
             elif msg_type == 'data_batch':
-                target_vb, batch_t, batch_v, batch_i, cycle, total_cycles = msg[
-                    _1], msg[_2], msg[_3], msg[_4], msg[_5], msg[_6]
+                target_vb, batch_t, batch_v, batch_isd, batch_ig, cycle, total_cycles = msg[
+                    _1], msg[_2], msg[_3], msg[_4], msg[_5], msg[_6], msg[_7]
                 if batch_t:
                     self.status_labels['bias_v'].setText(f"{target_vb:.6f}")
                     self.status_labels['gate_v'].setText(f"{batch_v[-1]:.6f}")
-                    self.status_labels['bias_i'].setText(f"{batch_i[-1]:.6e}")
+                    self.status_labels['bias_i'].setText(f"{batch_isd[-1]:.6e}")
+                    self.status_labels['gate_i'].setText(f"{batch_ig[-1]:.6e}")
                     self.status_labels['time'].setText(f"{batch_t[-1]:.3f}")
                     self.status_labels['stage'].setText(
                         f"执行波形 [循环 {cycle}/{total_cycles}]")
@@ -1196,26 +1225,30 @@ class ArbitraryGateWidget(BaseAppWidget):
                         grow = new_capacity - self.capacity
                         self.time_data = np.pad(self.time_data, (0, grow))
                         self.v_data = np.pad(self.v_data, (0, grow))
-                        self.i_data = np.pad(self.i_data, (0, grow))
+                        self.isd_data = np.pad(self.isd_data, (0, grow))
+                        self.ig_data = np.pad(self.ig_data, (0, grow))
                         self.capacity = new_capacity
                         self.log_info(f'绘图缓存已自动扩容至 {new_capacity} 点')
                     self.time_data[self.data_count:needed] = batch_t
                     self.v_data[self.data_count:needed] = batch_v
-                    self.i_data[self.data_count:needed] = batch_i
+                    self.isd_data[self.data_count:needed] = batch_isd
+                    self.ig_data[self.data_count:needed] = batch_ig
                     self.data_count = needed
                     self.points_changed = True
 
             elif msg_type == 'block_done':
-                vb, times, v_outs, i_outs, fname = msg[_1], msg[_2], msg[_3], msg[_4], msg[_5]
-                status = msg[6] if len(msg) > 6 else 'complete'
-                error = msg[7] if len(msg) > 7 else None
+                vb, times, v_outs, isd_outs, ig_outs, fname = (
+                    msg[_1], msg[_2], msg[_3], msg[_4], msg[_5], msg[_6]
+                )
+                status = msg[7] if len(msg) > 7 else 'complete'
+                error = msg[8] if len(msg) > 8 else None
                 self.note_result_status(status, error)
                 rate = len(times) / \
                     times[-1] if len(times) > 1 and times[-1] > 0 else 0
                 self.status_labels['rate'].setText(f"{rate:.2f}")
                 self.submit_save(
                     self.save_data,
-                    vb, times, v_outs, i_outs, fname,
+                    vb, times, v_outs, isd_outs, ig_outs, fname,
                     self.current_folder,
                     status=status, error=error,
                     stopped_at_local=time.strftime('%Y-%m-%d %H:%M:%S'),
@@ -1227,12 +1260,14 @@ class ArbitraryGateWidget(BaseAppWidget):
         if self.points_changed and self.data_count > 0:
             self.curve_v.setData(
                 self.time_data[:self.data_count], self.v_data[:self.data_count])
-            self.curve_i.setData(
-                self.time_data[:self.data_count], self.i_data[:self.data_count])
+            self.curve_isd.setData(
+                self.time_data[:self.data_count], self.isd_data[:self.data_count])
+            self.curve_ig.setData(
+                self.time_data[:self.data_count], self.ig_data[:self.data_count])
             self.points_changed = False
 
     def save_data(
-        self, vb, times, v_outs, i_outs, filename, output_folder,
+        self, vb, times, v_outs, isd_outs, ig_outs, filename, output_folder,
         status='complete', error=None, stopped_at_local=None,
     ):
         if status != 'complete':
@@ -1240,10 +1275,20 @@ class ArbitraryGateWidget(BaseAppWidget):
             filename = f'{stem}_partial{suffix}'
         fp = allocate_unique_path(output_folder, filename)
         try:
+            lengths = {
+                len(times), len(v_outs), len(isd_outs), len(ig_outs)
+            }
+            if len(lengths) != 1:
+                raise ValueError('时间、栅压、Isd 与 Ig 数据长度不一致')
             with atomic_text_writer(fp) as f:
-                f.write("Time(s)\tGateVoltage(V)\tSetBias(V)\tBiasCurrent(A)\n")
-                for t, v, i in zip(times, v_outs, i_outs):
-                    f.write(f"{t:.6f}\t{v:.6f}\t{vb:.6f}\t{i:.6e}\n")
+                f.write(
+                    "Time(s)\tGateVoltage(V)\tBiasVoltage(V)\t"
+                    "BiasCurrent(A)\tGateCurrent(A)\n"
+                )
+                for t, v, isd, ig in zip(times, v_outs, isd_outs, ig_outs):
+                    f.write(
+                        f"{t:.6f}\t{v:.6f}\t{vb:.6f}\t{isd:.6e}\t{ig:.6e}\n"
+                    )
             write_result_metadata(
                 fp, status=status, point_count=len(times), error=error,
                 stopped_at_local=stopped_at_local,

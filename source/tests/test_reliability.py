@@ -46,10 +46,8 @@ from modules.iv_curve import (
 )
 from modules.mapping_scan import MappingMeasurement
 from modules.break_junction import BreakMeasurement
-from modules.bias_switch import SwitchMeasurement
-from modules.gate_switch import GateSwitchMeasurement
 from modules.arbitrary_bias import ArbMeasurement
-from modules.arbitrary_gate import GateArbMeasurement
+from modules.arbitrary_gate import ArbitraryGateWidget, GateArbMeasurement
 from main import parse_config_modules
 from core.app_base import BaseAppWidget
 
@@ -310,21 +308,6 @@ class FastZeroingTests(unittest.TestCase):
                  'g_ramp_step': 0.05},
                 ('bias_keithley', 'gate_keithley'),
                 ['偏压表', '栅压表'],
-            ),
-            (
-                'modules.bias_switch.fast_shutdown_zero_2450',
-                SwitchMeasurement,
-                {'gate_enabled': True, 'b_ramp_step': 0.001,
-                 'g_ramp_step': 0.05},
-                ('bias_k', 'gate_k'),
-                ['偏压表', '栅压表'],
-            ),
-            (
-                'modules.gate_switch.fast_shutdown_zero_2450',
-                GateSwitchMeasurement,
-                {'b_ramp_step': 0.001, 'g_ramp_step': 0.05},
-                ('bias_k', 'gate_k'),
-                ['栅压表', '偏压表'],
             ),
             (
                 'modules.arbitrary_bias.fast_shutdown_zero_2450',
@@ -670,16 +653,6 @@ class StepDivisibilityTests(unittest.TestCase):
             }
             validate_program_step_plan('it', it)
 
-            bias_switch = numeric(modules['bias_switch'])
-            bias_switch['gate_enabled'] = bool(
-                modules['bias_switch'].get('__controls__', {}).get('cb_gate', False)
-            )
-            validate_program_step_plan('bias_switch', bias_switch)
-
-            validate_program_step_plan(
-                'gate_switch', numeric(modules['gate_switch'])
-            )
-
             arb_bias = numeric(modules['arbitrary_bias'])
             arb_bias['gate_enabled'] = bool(
                 modules['arbitrary_bias'].get('__controls__', {}).get(
@@ -936,6 +909,149 @@ class MappingMonitorTests(unittest.TestCase):
             time.sleep(0.005)
         measurement._stop_gate_monitor()
         self.assertFalse(measurement.gate_monitor.is_alive())
+
+
+class ArbitraryGateDualCurrentTests(unittest.TestCase):
+    def _worker(self, gate_response='2e-9', duration=0.003):
+        params = {
+            'b_target': 0.1,
+            'b_ramp_step': 0.001,
+            'b_step_delay': 0.0,
+            'b_settle': 0.0,
+            'g_ramp_step': 0.05,
+            'waveform': [[0.2, duration]],
+            'switch_settle': 0.0,
+            'cycles': 1,
+            'plot_interval': 2,
+            'filename': 'dual_current.txt',
+        }
+        worker = GateArbMeasurement(
+            params, queue.Queue(), threading.Event(), threading.Event()
+        )
+        worker.bias_k = FakeInstrument({':READ?': '1e-6'})
+        worker.gate_k = FakeInstrument({':READ?': gate_response})
+        return worker
+
+    def test_each_arbitrary_gate_sample_contains_isd_and_ig(self):
+        worker = self._worker()
+        with (
+            patch.object(worker, 'connect'),
+            patch.object(worker, 'setup'),
+            patch.object(worker, '_ramp_voltage', return_value=True),
+            patch.object(worker, '_sleep', return_value=True),
+            patch.object(worker, 'safe_zeroing'),
+            patch(
+                'modules.arbitrary_gate.reliable_output_off',
+                return_value=(True, []),
+            ),
+        ):
+            worker.run()
+
+        messages = []
+        while not worker.update_queue.empty():
+            messages.append(worker.update_queue.get_nowait())
+        completed = next(msg for msg in messages if msg[0] == 'block_done')
+        _kind, _vb, times, gate_voltages, isd, ig, _name, status, _error = completed
+        self.assertEqual(status, 'complete')
+        self.assertGreater(len(times), 0)
+        self.assertEqual(
+            {len(times), len(gate_voltages), len(isd), len(ig)},
+            {len(times)},
+        )
+        self.assertTrue(all(value == 1e-6 for value in isd))
+        self.assertTrue(all(value == 2e-9 for value in ig))
+
+    def test_gate_current_read_failure_stops_without_fabricating_data(self):
+        worker = self._worker(
+            gate_response=OSError('gate read failed'), duration=0.01
+        )
+        with (
+            patch.object(worker, 'connect'),
+            patch.object(worker, 'setup'),
+            patch.object(worker, '_ramp_voltage', return_value=True),
+            patch.object(worker, '_sleep', return_value=True),
+            patch.object(worker, 'safe_zeroing'),
+            patch(
+                'modules.arbitrary_gate.reliable_output_off',
+                return_value=(True, []),
+            ),
+        ):
+            worker.run()
+
+        messages = []
+        while not worker.update_queue.empty():
+            messages.append(worker.update_queue.get_nowait())
+        self.assertFalse(any(msg[0] == 'block_done' for msg in messages))
+        self.assertTrue(any(
+            msg[0] == 'log' and 'gate read failed' in msg[1]
+            for msg in messages
+        ))
+        self.assertEqual(messages[-1][0], 'finished')
+
+    def test_stop_and_force_stop_save_aligned_partial_data(self):
+        for event_name in ('stop_event', 'force_stop_event'):
+            with self.subTest(event=event_name):
+                worker = self._worker(duration=0.02)
+
+                def read_current(_instrument, _command, label):
+                    if '正式栅电流' in label:
+                        getattr(worker, event_name).set()
+                        return 2e-9
+                    return 1e-6
+
+                with (
+                    patch.object(worker, 'connect'),
+                    patch.object(worker, 'setup'),
+                    patch.object(worker, '_ramp_voltage', return_value=True),
+                    patch.object(worker, '_sleep', return_value=True),
+                    patch.object(worker, 'safe_zeroing'),
+                    patch(
+                        'modules.arbitrary_gate.required_float_query',
+                        side_effect=read_current,
+                    ),
+                    patch(
+                        'modules.arbitrary_gate.reliable_output_off',
+                        return_value=(True, []),
+                    ),
+                ):
+                    worker.run()
+
+                messages = []
+                while not worker.update_queue.empty():
+                    messages.append(worker.update_queue.get_nowait())
+                completed = next(
+                    msg for msg in messages if msg[0] == 'block_done'
+                )
+                _kind, _vb, times, gate_v, isd, ig, _name, status, _error = completed
+                self.assertEqual(status, 'partial')
+                self.assertGreater(len(times), 0)
+                self.assertEqual(
+                    {len(times), len(gate_v), len(isd), len(ig)},
+                    {len(times)},
+                )
+
+    def test_five_column_result_is_saved(self):
+        class SaveTarget:
+            def post_log(self, _message):
+                pass
+
+        with tempfile.TemporaryDirectory() as folder:
+            result = ArbitraryGateWidget.save_data(
+                SaveTarget(), 0.1,
+                [0.0, 0.5], [0.2, -0.2],
+                [1e-6, 2e-6], [1e-9, 2e-9],
+                'gate.txt', folder,
+            )
+            self.assertEqual(result['status'], 'complete')
+            path = Path(result['paths'][0])
+            header = path.read_text(encoding='utf-8').splitlines()[0]
+            self.assertEqual(
+                header,
+                'Time(s)\tGateVoltage(V)\tBiasVoltage(V)\t'
+                'BiasCurrent(A)\tGateCurrent(A)',
+            )
+            data = np.loadtxt(path, skiprows=1)
+            self.assertEqual(data.shape, (2, 5))
 
 
 class ConfigurationCompatibilityTests(unittest.TestCase):

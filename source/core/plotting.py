@@ -48,8 +48,6 @@ MODULE_NAMES = {
     'isd_vg_setvsd': '栅压特性扫描',
     'mapping_scan': '二维Mapping扫描',
     'it_step_setgate': 'It特性扫描',
-    'bias_switch': '偏压开关测试',
-    'gate_switch': '栅压开关测试',
     'arbitrary_bias': '任意偏压波形测试',
     'arbitrary_gate': '任意栅压波形测试',
 }
@@ -80,8 +78,6 @@ def default_plot_settings():
         'isd_vg_setvsd': ('Single-molecule transistor transfer', 'Gate voltage (V)', 'Current (A)'),
         'mapping_scan': ('Single-Molecule Transistor Stability Diagram', 'Gate voltage (V)', 'Bias voltage (mV)'),
         'it_step_setgate': ('Current-Time Characteristics', 'Time (s)', 'Current (A)'),
-        'bias_switch': ('Bias Switching Response', 'Time (s)', 'Voltage / Current'),
-        'gate_switch': ('Gate Switching Response', 'Time (s)', 'Voltage / Current'),
         'arbitrary_bias': ('Arbitrary Bias Response', 'Time (s)', 'Voltage / Current'),
         'arbitrary_gate': ('Arbitrary Gate Response', 'Time (s)', 'Voltage / Current'),
     }
@@ -91,8 +87,6 @@ def default_plot_settings():
         'isd_vg_setvsd': (89.0, 90.0),
         'mapping_scan': (120.0, 95.0),
         'it_step_setgate': (183.0, 80.0),
-        'bias_switch': (120.0, 100.0),
-        'gate_switch': (120.0, 100.0),
         'arbitrary_bias': (120.0, 100.0),
         'arbitrary_gate': (120.0, 100.0),
     }
@@ -296,7 +290,7 @@ class PlotSettingsDialog(QDialog):
         )
         preview_layout.addWidget(self.preview_widget)
         hint = QLabel(
-            '九个模块分别使用对应的单分子晶体管合成数据和绘图模板；'
+            '七个模块分别使用对应的单分子晶体管合成数据和绘图模板；'
             '中间栏的修改会立即反映到当前图，并用于正式输出。'
             '右侧为放大屏幕预览，文字和曲线显示尺寸会自动放大；'
             '导出文件仍严格使用中间栏标注的物理 pt 数值。'
@@ -619,12 +613,14 @@ class PlotSettingsDialog(QDialog):
                 page_form.addRow(self.cb_it_median)
                 page_form.addRow(self.cb_it_std)
             else:
-                drive = (
-                    'Gate voltage' if module_id in ('gate_switch', 'arbitrary_gate')
-                    else 'Bias voltage'
+                drive = 'Gate voltage' if module_id == 'arbitrary_gate' else 'Bias voltage'
+                current_text = (
+                    '中图 Bias current–Time；下图 Gate current–Time'
+                    if module_id == 'arbitrary_gate'
+                    else '下图 Current–Time'
                 )
                 page_form.addRow(QLabel(
-                    f'固定上下布局：上图 {drive}–Time；下图 Current–Time'
+                    f'固定布局：上图 {drive}–Time；{current_text}'
                 ))
         return scroll
 
@@ -1318,13 +1314,37 @@ class PlotSettingsDialog(QDialog):
                 right, module, 'Current distribution',
                 'Probability density', 'Current (nA)'
             )
+        elif module_id == 'arbitrary_gate':
+            t = np.linspace(0, 6, 900)
+            drive = np.select(
+                [t < 1, t < 2.4, t < 3.2, t < 4.8],
+                [0, .65, -.25, 1], default=.25,
+            )
+            isd = .15 + .9/(1+np.exp(-5*drive))
+            isd += .025*np.sin(2*np.pi*13*t)
+            ig = 0.04 * drive + .004*np.sin(2*np.pi*7*t)
+            top = self.preview_widget.addPlot(row=0, col=0)
+            middle = self.preview_widget.addPlot(row=1, col=0)
+            bottom = self.preview_widget.addPlot(row=2, col=0)
+            top.setXLink(bottom)
+            middle.setXLink(bottom)
+            top.plot(t, drive, pen=pen2)
+            middle.plot(t, isd, pen=pen1)
+            bottom.plot(t, ig, pen=pg.mkPen('#388E3C', width=1.5))
+            self._configure_preview_plot(
+                top, module, title, '', 'Gate voltage (V)'
+            )
+            self._configure_preview_plot(
+                middle, module, '', '', 'Bias current (nA)'
+            )
+            self._configure_preview_plot(
+                bottom, module, '', 'Time (s)', 'Gate current (nA)'
+            )
         else:
             t = np.linspace(0, 6, 900)
-            drive = (
-                np.where(t % 1.5 < .75, .8, -.2)
-                if 'switch' in module_id
-                else np.select([t < 1, t < 2.4, t < 3.2, t < 4.8],
-                               [0, .65, -.25, 1], default=.25)
+            drive = np.select(
+                [t < 1, t < 2.4, t < 3.2, t < 4.8],
+                [0, .65, -.25, 1], default=.25,
             )
             current = .15 + .9/(1+np.exp(-5*drive))
             current += .025*np.sin(2*np.pi*13*t)
@@ -1333,12 +1353,9 @@ class PlotSettingsDialog(QDialog):
             top.setXLink(bottom)
             top.plot(t, drive, pen=pen2)
             bottom.plot(t, current, pen=pen1)
-            voltage_name = (
-                'Gate voltage (V)'
-                if module_id in ('gate_switch', 'arbitrary_gate')
-                else 'Bias voltage (V)'
+            self._configure_preview_plot(
+                top, module, title, '', 'Bias voltage (V)'
             )
-            self._configure_preview_plot(top, module, title, '', voltage_name)
             self._configure_preview_plot(
                 bottom, module, '', 'Time (s)', 'Current (nA)'
             )
@@ -2291,15 +2308,37 @@ def render_result(result, settings):
     time_values = data[:, 0]
 
     fig = _new_figure(module)
+    if module_id == 'arbitrary_gate':
+        if data.shape[1] < 5:
+            raise ValueError('任意栅压数据必须包含 Isd 和 Ig 五列数据')
+        axes = fig.subplots(3, 1, sharex=True)
+        voltage_scaled, voltage_unit, _voltage_factor = _engineering_voltage(
+            data[:, 1]
+        )
+        isd_scaled, isd_unit, _isd_factor = _engineering_current(data[:, 3])
+        ig_scaled, ig_unit, _ig_factor = _engineering_current(data[:, 4])
+        colors = _module_palette(module, 3)
+        axes[0].plot(time_values, voltage_scaled, color=colors[2])
+        axes[0].set_ylabel(_label_with_unit(
+            'Gate voltage (V)', 'Gate voltage', voltage_unit
+        ))
+        axes[1].plot(time_values, isd_scaled, color=colors[0])
+        axes[1].set_ylabel(f'$I_{{sd}}$ ({isd_unit})')
+        axes[2].plot(time_values, ig_scaled, color=colors[1])
+        axes[2].set_ylabel(f'$I_g$ ({ig_unit})')
+        axes[2].set_xlabel(module.get('x_label') or 'Time (s)')
+        _decorate_axis(axes[0], settings)
+        _decorate_axis(axes[1], settings, current_axis=True)
+        _decorate_axis(axes[2], settings, current_axis=True)
+        fig.suptitle(module.get('title', '') + status)
+        _apply_figure_style(fig, settings, partial=partial)
+        return _save_all_formats(fig, output, stem_base, module)
+
     axes = fig.subplots(2, 1, sharex=True)
-    if module_id in ('bias_switch', 'arbitrary_bias'):
+    if module_id == 'arbitrary_bias':
         voltage_index = 2 if data.shape[1] >= 4 else 1
         current_index = data.shape[1] - 1
         voltage_label = 'Bias voltage (V)'
-    elif module_id in ('gate_switch', 'arbitrary_gate'):
-        voltage_index = 1
-        current_index = 3 if data.shape[1] >= 4 else data.shape[1] - 1
-        voltage_label = 'Gate voltage (V)'
     else:
         raise ValueError(f'不支持的绘图模块：{module_id}')
     voltage_scaled, voltage_unit, _voltage_factor = _engineering_voltage(

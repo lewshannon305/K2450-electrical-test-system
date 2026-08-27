@@ -196,31 +196,6 @@ def validate_program_step_plan(program, params):
                 validate_step_divides_interval(
                     0, test_step, ramp_step, f'{name}相邻测量点间的爬坡'
                 )
-    elif program == 'bias_switch':
-        for key, label in (
-            ('test_v', '偏压开关测试电压'),
-            ('sw1_v', '偏压开关状态1'),
-            ('sw2_v', '偏压开关状态2'),
-        ):
-            validate_step_divides_interval(
-                0, params[key], params['b_ramp_step'], label
-            )
-        if params.get('gate_enabled', False):
-            validate_step_divides_interval(
-                0, params['g_target'], params['g_ramp_step'], '偏压开关栅压爬坡'
-            )
-    elif program == 'gate_switch':
-        validate_step_divides_interval(
-            0, params['b_target'], params['b_ramp_step'], '栅压开关偏压爬坡'
-        )
-        for key, label in (
-            ('test_vg', '栅压开关测试电压'),
-            ('sw1_vg', '栅压开关状态1'),
-            ('sw2_vg', '栅压开关状态2'),
-        ):
-            validate_step_divides_interval(
-                0, params[key], params['g_ramp_step'], label
-            )
     elif program == 'arbitrary_bias':
         for index, (voltage, _duration) in enumerate(params['waveform'], 1):
             validate_step_divides_interval(

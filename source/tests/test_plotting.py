@@ -264,6 +264,31 @@ class PlotRenderingTests(unittest.TestCase):
             svg = Path(outputs[0]).read_text(encoding='utf-8')
             self.assertIn('Current (nA)', svg)
 
+    def test_arbitrary_gate_five_columns_render_three_panels(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'arbitrary_gate.txt'
+            np.savetxt(
+                path,
+                np.array([
+                    [0.0, 0.1, 0.05, 1e-6, 1e-9],
+                    [1.0, -0.1, 0.05, 2e-6, 2e-9],
+                ]),
+                header='Time GateVoltage BiasVoltage BiasCurrent GateCurrent',
+            )
+            settings = default_plot_settings()
+            settings['modules']['arbitrary_gate']['formats'] = ['svg']
+            outputs = render_result({
+                'run_id': 'gatecurrents',
+                'module_id': 'arbitrary_gate',
+                'status': 'complete',
+                'data_files': [str(path)],
+            }, settings)
+            self.assertEqual(len(outputs), 1)
+            svg = Path(outputs[0]).read_text(encoding='utf-8')
+            self.assertIn('Gate voltage', svg)
+            self.assertIn('I', svg)
+            self.assertIn('sd', svg)
+
     def test_iv_legend_uses_all_semantic_segment_labels(self):
         with tempfile.TemporaryDirectory() as folder:
             paths = []

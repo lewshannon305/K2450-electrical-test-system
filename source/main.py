@@ -33,9 +33,7 @@ from core.paths import readme_path
 from modules.iv_curve import IVWidget
 from modules.isd_vg_setvsd import IsdVgSetVsdWidget
 from modules.break_junction import BreakJunctionWidget
-from modules.bias_switch import BiasSwitchWidget
 from modules.mapping_scan import MappingWidget
-from modules.gate_switch import GateSwitchWidget
 from modules.it_step_setgate import ItStepWidget
 from modules.arbitrary_bias import ArbitraryBiasWidget
 from modules.arbitrary_gate import ArbitraryGateWidget
@@ -137,7 +135,7 @@ class WelcomePage(QWidget):
         tips_html = (
             "<p style='margin: 10px 0; font-size: 12pt;'><b>1. 硬件连接：</b>请确保 Keithley 源表已通过 GPIB 妥善连接。</p>"
             "<p style='margin: 10px 0; font-size: 12pt;'><b>2. 初始化：</b>进入任意测试模块后，请先点击“扫描设备”获取并确认仪器地址。</p>"
-            "<p style='margin: 10px 0; font-size: 12pt;'><b>3. 参数保存：</b>本系统支持“文件 -> 保存/加载配置”，可一键备份并恢复所有 9 个模块的测试参数。</p>"
+            "<p style='margin: 10px 0; font-size: 12pt;'><b>3. 参数保存：</b>本系统支持“文件 -> 保存/加载配置”，可一键备份并恢复所有 7 个模块的测试参数。</p>"
             "<p style='margin: 10px 0; font-size: 12pt;'><b>4. 扫描顺序：</b>所有模块的步长输入均强制要求为正，扫描方向由起始终止电压的大小关系自动确定。</p>"
             "<p style='margin: 10px 0; font-size: 12pt;'><b>5. 极限性能警告：</b>高频采样时，请尽量避免后台高负载任务。</p>"
             "<p style='margin: 10px 0; font-size: 12pt;'><b>6. 紧急制动：</b>若测试遇险，请立即点击各界面右下角红色“强制终止”按钮。</p>"
@@ -237,8 +235,6 @@ class MainWindow(QMainWindow):
             "栅压特性扫描",
             "二维Mapping扫描",
             "It特性扫描",
-            "偏压开关测试",
-            "栅压开关测试",
             "任意偏压波形测试",
             "任意栅压波形测试",
         ]
@@ -256,10 +252,6 @@ class MainWindow(QMainWindow):
                 self.stack.addWidget(MappingWidget(run_guard=self.run_guard))
             elif name == "It特性扫描":
                 self.stack.addWidget(ItStepWidget(run_guard=self.run_guard))
-            elif name == "偏压开关测试":
-                self.stack.addWidget(BiasSwitchWidget(run_guard=self.run_guard))
-            elif name == "栅压开关测试":
-                self.stack.addWidget(GateSwitchWidget(run_guard=self.run_guard))
             elif name == "任意偏压波形测试":
                 self.stack.addWidget(ArbitraryBiasWidget(run_guard=self.run_guard))
             elif name == "任意栅压波形测试":
