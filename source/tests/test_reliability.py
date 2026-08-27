@@ -235,6 +235,7 @@ class GlobalInstrumentSelectionTests(unittest.TestCase):
             page.scan_instruments()
         self.assertEqual(settings.bias_address, one)
         self.assertEqual(settings.gate_address, '')
+        self.assertEqual(page.summary_status.text(), '已扫描到 1 台设备')
 
         two = 'GPIB0::9::INSTR'
         with patch(
@@ -244,6 +245,34 @@ class GlobalInstrumentSelectionTests(unittest.TestCase):
             page.scan_instruments()
         self.assertEqual(settings.bias_address, one)
         self.assertEqual(settings.gate_address, two)
+        self.assertEqual(page.summary_status.text(), '已扫描到 2 台设备')
+
+    def test_scan_status_reports_progress_and_missing_visa(self):
+        settings = InstrumentSettings()
+        page = WelcomePage(settings)
+        progress = {}
+
+        def missing_backend():
+            progress['text'] = page.summary_status.text()
+            progress['button_enabled'] = page.btn_scan.isEnabled()
+            raise ValueError(
+                'Could not locate a VISA implementation. '
+                'Install either the IVI binary or pyvisa-py.'
+            )
+
+        with patch('main.pyvisa.ResourceManager', side_effect=missing_backend):
+            page.scan_instruments()
+
+        self.assertEqual(progress['text'], '正在扫描设备…')
+        self.assertFalse(progress['button_enabled'])
+        self.assertEqual(
+            page.summary_status.text(), '扫描失败：未安装 VISA 驱动'
+        )
+        self.assertIn(
+            'Could not locate a VISA implementation',
+            page.summary_status.toolTip(),
+        )
+        self.assertTrue(page.btn_scan.isEnabled())
 
     def test_scanning_long_addresses_keeps_welcome_columns_equal(self):
         settings = InstrumentSettings()

@@ -204,6 +204,7 @@ class WelcomePage(QWidget):
         self.summary_status.setSizePolicy(
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
         )
+        self.summary_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         for label in (self.bias_status, self.gate_status, self.summary_status):
             label.setFont(ui_font)
 
@@ -233,9 +234,9 @@ class WelcomePage(QWidget):
         buttons.addStretch()
         buttons.addWidget(self.btn_scan)
         buttons.addWidget(self.btn_detect)
-        buttons.addWidget(self.summary_status)
         buttons.addStretch()
         grid.addLayout(buttons, 2, 0, 1, 4)
+        grid.addWidget(self.summary_status, 3, 0, 1, 4)
 
         self.bias_address.currentTextChanged.connect(self._selection_changed)
         self.gate_address.currentTextChanged.connect(self._selection_changed)
@@ -284,6 +285,11 @@ class WelcomePage(QWidget):
         label.setStyleSheet(f'color: {color};')
         label.setToolTip(tooltip)
 
+    def _set_summary_status(self, text, color='#666666', tooltip=''):
+        self.summary_status.setText(text)
+        self.summary_status.setStyleSheet(f'color: {color};')
+        self.summary_status.setToolTip(tooltip)
+
     @staticmethod
     def _replace_combo_items(combo, resources, selected, fallback):
         combo.blockSignals(True)
@@ -297,6 +303,9 @@ class WelcomePage(QWidget):
     def scan_instruments(self):
         bias_current = self._address_text(self.bias_address)
         gate_current = self._address_text(self.gate_address)
+        self.btn_scan.setEnabled(False)
+        self._set_summary_status('正在扫描设备…', '#0066AA')
+        QApplication.processEvents()
         try:
             rm = pyvisa.ResourceManager()
             try:
@@ -306,9 +315,15 @@ class WelcomePage(QWidget):
                 if callable(close):
                     close()
         except Exception as exc:
-            self.summary_status.setText(f'设备扫描失败: {exc}')
-            self.summary_status.setStyleSheet('color: #AA0000;')
+            detail = str(exc)
+            if 'visa implementation' in detail.lower():
+                text = '扫描失败：未安装 VISA 驱动'
+            else:
+                text = '设备扫描失败'
+            self._set_summary_status(text, '#AA0000', detail)
             return
+        finally:
+            self.btn_scan.setEnabled(True)
 
         bias_fallback = resources[0] if resources else ''
         gate_fallback = resources[1] if len(resources) > 1 else ''
@@ -319,8 +334,10 @@ class WelcomePage(QWidget):
             self.gate_address, resources, gate_current, gate_fallback
         )
         self._selection_changed()
-        if not resources:
-            self.summary_status.setText('未扫描到可用仪器')
+        if resources:
+            self._set_summary_status(f'已扫描到 {len(resources)} 台设备')
+        else:
+            self._set_summary_status('未扫描到可用仪器')
 
     @staticmethod
     def _detect_one(resource_manager, address):
