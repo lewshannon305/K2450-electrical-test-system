@@ -15,6 +15,7 @@ $builtExe = Join-Path $builtApp "$appName.exe"
 $builtRuntime = Join-Path $builtApp "runtime"
 $targetExe = Join-Path $repoRoot "$appName.exe"
 $targetRuntime = Join-Path $repoRoot "runtime"
+$originalPath = $env:PATH
 
 function Assert-DirectChildOfRepo([string]$Path) {
     $resolvedParent = [System.IO.Path]::GetFullPath((Split-Path $Path -Parent))
@@ -37,6 +38,13 @@ try {
     }
 
     Write-Host "[2/3] Building the Windows application..."
+    # Codex and other developer tools may prepend their own native runtimes to
+    # PATH. PyInstaller follows PATH while resolving DLL dependencies, which can
+    # accidentally bundle an incompatible Poppler ICU beside Qt. Build only
+    # against the machine and Python environment paths.
+    $env:PATH = (($originalPath -split ';') | Where-Object {
+        $_ -and $_ -notmatch '[\\/]\.cache[\\/]codex-runtimes[\\/]'
+    }) -join ';'
     & $Python -m PyInstaller `
         --noconfirm `
         --clean `
@@ -54,6 +62,11 @@ try {
     }
     if (-not (Test-Path -LiteralPath $builtRuntime -PathType Container)) {
         throw "The packaged runtime directory was not found."
+    }
+    $bundledIcu = Get-ChildItem -LiteralPath $builtRuntime -File -Filter "icu*.dll"
+    if ($bundledIcu) {
+        $names = ($bundledIcu.Name -join ", ")
+        throw "Unexpected ICU DLLs were bundled ($names). Check the build PATH before publishing."
     }
 
     Write-Host "[3/3] Updating the runnable files in the repository root..."
@@ -76,5 +89,6 @@ try {
     Write-Host "Done: $appName.exe ($exeSize MB) + runtime ($runtimeSize MB)"
 }
 finally {
+    $env:PATH = $originalPath
     Pop-Location
 }
