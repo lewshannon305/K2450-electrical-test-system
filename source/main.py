@@ -199,7 +199,7 @@ class WelcomePage(QWidget):
         self.gate_terminal.setFont(ui_font)
 
         self.bias_status = QLabel('● 未选择')
-        self.gate_status = QLabel('● 未选择（可选）')
+        self.gate_status = QLabel('● 未选择')
         self.summary_status = QLabel('尚未选择仪器')
         self.summary_status.setSizePolicy(
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
@@ -270,7 +270,7 @@ class WelcomePage(QWidget):
         )
         self._set_status(
             self.gate_status,
-            '未检测' if gate_selected else '未选择（可选）',
+            '未检测' if gate_selected else '未选择',
             '#666666',
         )
         self.summary_status.setText(
@@ -373,7 +373,7 @@ class WelcomePage(QWidget):
                         )
             else:
                 self._set_status(
-                    self.gate_status, '未选择（可选）', '#666666'
+                    self.gate_status, '未选择', '#666666'
                 )
         except Exception as exc:
             self.summary_status.setText(f'连接检测失败: {exc}')
