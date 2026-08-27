@@ -11,8 +11,8 @@ from unittest.mock import patch
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 import numpy as np
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QApplication, QFrame
+from PyQt6.QtCore import QPoint, Qt
+from PyQt6.QtWidgets import QApplication, QFrame, QGroupBox
 
 from core.hardware_base import (
     InstrumentConfigurationError,
@@ -862,20 +862,46 @@ class IVScanModeTests(unittest.TestCase):
         app = QApplication.instance() or QApplication([])
         widget = IVWidget()
         try:
+            widget.resize(900, 800)
+            widget.show()
+            app.processEvents()
             self.assertFalse(hasattr(widget, 'mode_combo'))
+            group_titles = {
+                group.title() for group in widget.findChildren(QGroupBox)
+            }
+            self.assertIn('扫描方式与范围', group_titles)
+            self.assertIn('采集与保护参数', group_titles)
+            self.assertNotIn('控制参数', group_titles)
+            self.assertEqual(
+                widget.inputs['v_start'].mapToGlobal(QPoint()).x(),
+                widget.inputs['i_limit'].mapToGlobal(QPoint()).x(),
+            )
+            self.assertEqual(
+                widget.inputs['v_end'].mapToGlobal(QPoint()).x(),
+                widget.inputs['nplc'].mapToGlobal(QPoint()).x(),
+            )
             expected = {
                 'single': widget.rb_iv_single,
                 'bidirectional': widget.rb_iv_bidirectional,
                 'hysteresis': widget.rb_iv_hysteresis,
                 'custom': widget.rb_iv_custom,
             }
+            self.assertEqual(widget.rb_iv_custom.text(), 'Custom 自定义')
             for mode, button in expected.items():
+                acquisition_group = next(
+                    group for group in widget.findChildren(QGroupBox)
+                    if group.title() == '采集与保护参数'
+                )
+                before_y = acquisition_group.mapToGlobal(QPoint()).y()
                 button.setChecked(True)
                 app.processEvents()
                 self.assertEqual(widget.selected_iv_mode(), mode)
                 self.assertEqual(
                     widget.iv_mode_stack.currentIndex(),
                     1 if mode == 'custom' else 0,
+                )
+                self.assertEqual(
+                    acquisition_group.mapToGlobal(QPoint()).y(), before_y
                 )
             widget.set_iv_mode('hysteresis')
             self.assertEqual(widget.lbl_v_start.text(), '目标电压一 (V):')

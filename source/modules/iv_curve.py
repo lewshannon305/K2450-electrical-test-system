@@ -1321,42 +1321,61 @@ class IVWidget(BaseAppWidget):
         scroll_content_layout.addWidget(self.gate_group)
         self.gate_group.setVisible(False)
 
-        ctrl_group = QGroupBox("控制参数")
-        ctrl_group.setFont(self.bold_font)
-        ctrl_layout = QVBoxLayout(ctrl_group)
+        scan_group = QGroupBox("扫描方式与范围")
+        scan_group.setFont(self.bold_font)
+        scan_layout = QVBoxLayout(scan_group)
+        scan_layout.setContentsMargins(12, 18, 12, 12)
 
-        mode_grid = QGridLayout()
-        mode_label = QLabel('扫描模式:')
-        mode_label.setFont(self.ui_font)
-        mode_grid.addWidget(mode_label, 0, 0)
+        mode_rows = QVBoxLayout()
+        mode_rows.setContentsMargins(0, 0, 0, 0)
         self.iv_mode_group = QButtonGroup(self)
         mode_specs = (
-            ('rb_iv_single', 'Single（单向）', 'single', 0, 1),
-            ('rb_iv_bidirectional', 'Bidirectional（双向）', 'bidirectional', 0, 2),
-            ('rb_iv_hysteresis', 'Hysteresis（回滞）', 'hysteresis', 1, 1),
-            ('rb_iv_custom', '自定义序列（Custom）', 'custom', 1, 2),
+            ('rb_iv_single', 'Single 单向', 'single'),
+            ('rb_iv_bidirectional', 'Bidirectional 双向', 'bidirectional'),
+            ('rb_iv_hysteresis', 'Hysteresis 回滞', 'hysteresis'),
+            ('rb_iv_custom', 'Custom 自定义', 'custom'),
         )
-        for attr, title, mode, row, column in mode_specs:
+        mode_buttons = []
+        for attr, title, mode in mode_specs:
             button = QRadioButton(title)
             button.setFont(self.ui_font)
             button.setStyleSheet('font-weight: normal;')
             button.setProperty('iv_mode', mode)
             self.iv_mode_group.addButton(button)
             setattr(self, attr, button)
-            mode_grid.addWidget(button, row, column)
+            mode_buttons.append(button)
             button.toggled.connect(self.refresh_iv_mode_controls)
+        for left_button, right_button in (
+            (mode_buttons[0], mode_buttons[1]),
+            (mode_buttons[2], mode_buttons[3]),
+        ):
+            row_layout = QHBoxLayout()
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.addWidget(left_button)
+            row_layout.addStretch(1)
+            row_layout.addWidget(right_button)
+            mode_rows.addLayout(row_layout)
         self.rb_iv_single.setChecked(True)
-        ctrl_layout.addLayout(mode_grid)
+        scan_layout.addLayout(mode_rows)
+
+        def align_parameter_grid(grid):
+            grid.setColumnMinimumWidth(0, 150)
+            grid.setColumnMinimumWidth(2, 150)
+            grid.setColumnStretch(1, 1)
+            grid.setColumnStretch(3, 1)
+            grid.setHorizontalSpacing(10)
 
         self.iv_mode_stack = QStackedWidget()
         range_page = QWidget()
         range_grid = QGridLayout(range_page)
         range_grid.setContentsMargins(0, 0, 0, 0)
+        align_parameter_grid(range_grid)
         self.lbl_v_start = QLabel('起始电压 (V):')
         self.lbl_v_end = QLabel('终止电压 (V):')
         self.lbl_v_step = QLabel('扫描步长 (V) (正):')
         for label in (self.lbl_v_start, self.lbl_v_end, self.lbl_v_step):
             label.setFont(self.ui_font)
+            label.setFixedWidth(150)
         for key, default in (
             ('v_start', '-1.0'), ('v_end', '1.0'), ('v_step', '0.02')
         ):
@@ -1378,41 +1397,45 @@ class IVWidget(BaseAppWidget):
         custom_page = QWidget()
         custom_grid = QGridLayout(custom_page)
         custom_grid.setContentsMargins(0, 0, 0, 0)
+        align_parameter_grid(custom_grid)
         self.btn_custom_iv = QPushButton('打开自定义电压序列编辑器')
         self.btn_custom_iv.setFont(self.bold_font)
         self.btn_custom_iv.setStyleSheet('color: #B35A00;')
         self.btn_custom_iv.clicked.connect(self.open_custom_iv_editor)
-        custom_grid.addWidget(self.btn_custom_iv, 0, 0)
+        custom_grid.addWidget(self.btn_custom_iv, 0, 0, 1, 2)
         self.lbl_custom_iv_summary = QLabel('')
         self.lbl_custom_iv_summary.setFont(self.ui_font)
         self.lbl_custom_iv_summary.setStyleSheet(
             'font-weight: normal; color: #005500;'
         )
-        custom_grid.addWidget(self.lbl_custom_iv_summary, 0, 1)
-        custom_grid.setColumnStretch(1, 1)
+        custom_grid.addWidget(self.lbl_custom_iv_summary, 0, 2, 1, 2)
         self.iv_mode_stack.addWidget(custom_page)
-        ctrl_layout.addWidget(self.iv_mode_stack)
+        scan_layout.addWidget(self.iv_mode_stack)
+        scroll_content_layout.addWidget(scan_group)
 
-        common_grid = QGridLayout()
+        acquisition_group = QGroupBox("采集与保护参数")
+        acquisition_group.setFont(self.bold_font)
+        common_grid = QGridLayout(acquisition_group)
+        common_grid.setContentsMargins(12, 18, 12, 12)
+        align_parameter_grid(common_grid)
         common_items = (
             ('电流限制 (A):', 'i_limit', '1.05e-6', 0, 0),
             ('NPLC:', 'nplc', '1.0', 0, 2),
             ('稳定时间 (s):', 'settle_time', '0.0', 1, 0),
-            ('电流量程 (A 或 AUTO):', 'current_range', '1e-6', 1, 2),
-            ('循环次数 (Cycles):', 'cycles', '1', 2, 0),
+            ('电流量程 (A/AUTO):', 'current_range', '1e-6', 1, 2),
+            ('循环次数:', 'cycles', '1', 2, 0),
         )
         for text, key, default, row, column in common_items:
             label = QLabel(text)
             label.setFont(self.ui_font)
+            label.setFixedWidth(150)
             control = QLineEdit(default)
             control.setFont(self.ui_font)
             common_grid.addWidget(label, row, column)
             common_grid.addWidget(control, row, column + 1)
             self.inputs[key] = control
-        ctrl_layout.addLayout(common_grid)
+        scroll_content_layout.addWidget(acquisition_group)
         self.refresh_iv_mode_controls()
-
-        scroll_content_layout.addWidget(ctrl_group)
 
         path_group = QGroupBox("文件保存路径")
         path_group.setFont(self.bold_font)
