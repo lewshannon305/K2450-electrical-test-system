@@ -681,6 +681,11 @@ class MainWindow(QMainWindow):
                         if widget.rb_sample_realtime.isChecked()
                         else 'triggered'
                     )
+                if hasattr(widget, 'selected_iv_mode'):
+                    mod_data['mode'] = widget.selected_iv_mode()
+                    mod_data['custom_voltage_text'] = (
+                        widget.custom_iv_text
+                    )
                 if hasattr(widget, 'gate_settings'):
                     if hasattr(widget, 'current_gate_settings'):
                         mod_data['__gate_settings__'] = (
@@ -749,6 +754,14 @@ class MainWindow(QMainWindow):
                     mode = str(mod_data.get('acquisition_mode', 'triggered'))
                     widget.rb_sample_realtime.setChecked(mode == 'realtime')
                     widget.rb_sample_triggered.setChecked(mode != 'realtime')
+                if hasattr(widget, 'set_iv_mode'):
+                    widget.custom_iv_text = str(
+                        mod_data.get(
+                            'custom_voltage_text',
+                            widget.custom_iv_text,
+                        )
+                    )
+                    widget.set_iv_mode(mod_data.get('mode', 'single'))
                 if str(mod_data.get('__folder__', '')).strip():
                     if hasattr(widget, 'ent_folder'):
                         widget.ent_folder.setText(str(mod_data['__folder__']))

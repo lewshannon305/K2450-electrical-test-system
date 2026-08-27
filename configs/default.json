@@ -31,6 +31,7 @@
         "cycles": "1",
         "i_limit": "1.05e-6",
         "mode": "single",
+        "custom_voltage_text": "-1, -0.5, 0, 0.5, 1",
         "settle_time": "0.0",
           "file_prefix": "IV",
           "gate_voltage_range": "20.0",

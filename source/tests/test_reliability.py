@@ -47,6 +47,7 @@ from modules.iv_curve import (
     build_gate_targets,
     default_iv_gate_settings,
     merge_gate_settings_into_iv_params,
+    parse_custom_iv_values,
     parse_custom_gate_values,
 )
 from modules.mapping_scan import MappingMeasurement
@@ -843,6 +844,107 @@ class IVMultiGateTests(unittest.TestCase):
             self.assertEqual(
                 metadata['gate_targets'], [0, 0.05, 0.1, 0.05]
             )
+
+
+class IVScanModeTests(unittest.TestCase):
+    def test_custom_voltage_parser_accepts_dense_text_and_keeps_duplicates(self):
+        text = '-1,-0.5 0；0.5，1\t0.5\n0'
+        self.assertEqual(
+            parse_custom_iv_values(text),
+            [-1.0, -0.5, 0.0, 0.5, 1.0, 0.5, 0.0],
+        )
+        with self.assertRaisesRegex(ValueError, '第2项'):
+            parse_custom_iv_values('0, wrong, 1')
+        with self.assertRaisesRegex(ValueError, '不能为空'):
+            parse_custom_iv_values('  ')
+
+    def test_four_radio_modes_show_matching_parameter_page(self):
+        app = QApplication.instance() or QApplication([])
+        widget = IVWidget()
+        try:
+            self.assertFalse(hasattr(widget, 'mode_combo'))
+            expected = {
+                'single': widget.rb_iv_single,
+                'bidirectional': widget.rb_iv_bidirectional,
+                'hysteresis': widget.rb_iv_hysteresis,
+                'custom': widget.rb_iv_custom,
+            }
+            for mode, button in expected.items():
+                button.setChecked(True)
+                app.processEvents()
+                self.assertEqual(widget.selected_iv_mode(), mode)
+                self.assertEqual(
+                    widget.iv_mode_stack.currentIndex(),
+                    1 if mode == 'custom' else 0,
+                )
+            widget.set_iv_mode('hysteresis')
+            self.assertEqual(widget.lbl_v_start.text(), '目标电压一 (V):')
+            self.assertEqual(widget.lbl_v_end.text(), '目标电压二 (V):')
+            widget.custom_iv_text = ','.join(str(i / 10) for i in range(40))
+            widget._update_custom_iv_summary()
+            self.assertIn('40', widget.lbl_custom_iv_summary.text())
+        finally:
+            widget.close()
+
+    def test_custom_measurement_uses_only_entered_points_in_order(self):
+        values = [-0.2, 0.0, 0.3, 0.3, -0.1]
+        worker = IV_Measurement(
+            {
+                'mode': 'custom',
+                'custom_voltages': values,
+                'v_start': values[0],
+                'v_end': values[-1],
+                'v_step': 0.01,
+                'settle_time': 0.0,
+                'gate_enabled': False,
+            },
+            queue.Queue(), queue.Queue(),
+            threading.Event(), threading.Event(),
+        )
+        worker.keithley = FakeInstrument({
+            ':READ?': ['0'] + ['1e-9'] * len(values),
+        })
+        worker._reset_cycle_data()
+        worker.measure_loop()
+        source_values = [
+            float(command.split()[-1])
+            for command in worker.keithley.writes
+            if command.startswith(':SOUR:VOLT ')
+        ]
+        self.assertEqual(source_values, values)
+        np.testing.assert_allclose(
+            worker._cycle_snapshot()['voltage'][0], values
+        )
+
+    def test_custom_sequence_saves_one_file_and_metadata(self):
+        class SaveHarness:
+            def post_log(self, _message):
+                pass
+
+        values = np.array([-0.2, 0.0, 0.3, 0.3, -0.1])
+        empty = np.array([])
+        with tempfile.TemporaryDirectory() as folder:
+            result = IVWidget.save_data(
+                SaveHarness(), folder, 'IV', 'custom',
+                values[0], values[-1], 0.01,
+                {0: values, 1: empty, 2: empty, 3: empty},
+                {0: values * 1e-6, 1: empty, 2: empty, 3: empty},
+                {0: empty, 1: empty, 2: empty, 3: empty},
+                {0: len(values), 1: 0, 2: 0, 3: 0},
+                1, 'complete', None,
+                gate_metadata={
+                    'custom_voltage_text': '-0.2, 0, 0.3, 0.3, -0.1',
+                    'custom_voltages': values.tolist(),
+                },
+            )
+            self.assertEqual(len(result['paths']), 1)
+            path = Path(result['paths'][0])
+            self.assertIn('custom_5points', path.name)
+            metadata = json.loads(
+                (path.parent / 'metadata' / f'{path.stem}_meta.json')
+                .read_text(encoding='utf-8')
+            )
+            self.assertEqual(metadata['custom_voltages'], values.tolist())
 
 
 class StepDivisibilityTests(unittest.TestCase):

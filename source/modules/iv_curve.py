@@ -25,10 +25,10 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QCheckBox,
     QDialog,
-    QDialogButtonBox,
     QRadioButton,
     QButtonGroup,
     QPlainTextEdit,
+    QStackedWidget,
 )
 from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtGui import QFont
@@ -62,11 +62,124 @@ from core.hardware_base import (
     write_result_metadata,
 )
 from core.instrument_config import InstrumentSettings
-from core.utils import G0, NoScrollComboBox, _0, _1, _2, _3, configure_pyqtgraph
+from core.utils import G0, _0, _1, _2, _3, configure_pyqtgraph
 
 
 class GateLeakageError(RuntimeError):
     pass
+
+
+def parse_custom_iv_values(text):
+    tokens = [
+        token for token in re.split(r'[\s,;，；]+', str(text).strip())
+        if token
+    ]
+    if not tokens:
+        raise ValueError('自定义电压序列不能为空')
+    values = []
+    for index, token in enumerate(tokens, 1):
+        try:
+            value = float(token)
+        except ValueError as exc:
+            raise ValueError(
+                f'自定义电压第{index}项不是有效数字：{token}'
+            ) from exc
+        if not math.isfinite(value):
+            raise ValueError(f'自定义电压第{index}项必须为有限数')
+        validate_source_voltage(value, f'自定义电压第{index}项')
+        values.append(float(value))
+    return values
+
+
+class IVCustomVoltageDialog(QDialog):
+    def __init__(self, text, parent=None, ui_font=None, bold_font=None):
+        super().__init__(parent)
+        self.setWindowTitle('自定义电压序列编辑器')
+        self.resize(1000, 600)
+        self.setWindowFlags(
+            self.windowFlags()
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowMaximizeButtonHint
+        )
+        self.ui_font = ui_font or QFont('Arial', 12)
+        self.bold_font = bold_font or QFont('Arial', 12)
+        self.bold_font.setWeight(QFont.Weight.Bold)
+        self.sequence_text = str(text)
+        self.values = []
+
+        main_layout = QHBoxLayout(self)
+
+        left_group = QGroupBox('电压序列')
+        left_group.setFont(self.bold_font)
+        left_layout = QVBoxLayout(left_group)
+        self.editor = QPlainTextEdit(self.sequence_text)
+        self.editor.setFont(self.ui_font)
+        self.editor.setPlaceholderText(
+            '请输入电压值，使用逗号、空格、分号、Tab或换行分隔。\n'
+            '例如：-1, -0.5, 0, 0.5, 1'
+        )
+        self.editor.textChanged.connect(self.update_preview)
+        left_layout.addWidget(self.editor)
+        main_layout.addWidget(left_group, stretch=2)
+
+        right_group = QGroupBox('序列预览')
+        right_group.setFont(self.bold_font)
+        right_layout = QVBoxLayout(right_group)
+        self.graph_widget = pg.GraphicsLayoutWidget()
+        right_layout.addWidget(self.graph_widget)
+        self.plot_preview = self.graph_widget.addPlot()
+        self.plot_preview.setLabel(
+            'left', text='Voltage', units='V',
+            **{'color': '#000', 'font-size': '11pt'},
+        )
+        self.plot_preview.setLabel(
+            'bottom', text='Point index',
+            **{'color': '#000', 'font-size': '11pt'},
+        )
+        self.plot_preview.showGrid(x=True, y=True, alpha=0.4)
+        self.curve_preview = self.plot_preview.plot(
+            pen=pg.mkPen('r', width=2.0),
+        )
+
+        button_layout = QHBoxLayout()
+        btn_cancel = QPushButton('取消')
+        btn_cancel.setFont(self.bold_font)
+        btn_cancel.setFixedSize(100, 30)
+        btn_cancel.clicked.connect(self.reject)
+        btn_ok = QPushButton('确认')
+        btn_ok.setFont(self.bold_font)
+        btn_ok.setFixedSize(100, 30)
+        btn_ok.setStyleSheet('color: #AA0000;')
+        btn_ok.clicked.connect(self.on_ok)
+        button_layout.addStretch()
+        button_layout.addWidget(btn_cancel)
+        button_layout.addWidget(btn_ok)
+        right_layout.addLayout(button_layout)
+        main_layout.addWidget(right_group, stretch=3)
+        self.update_preview()
+
+    def update_preview(self):
+        try:
+            values = parse_custom_iv_values(self.editor.toPlainText())
+        except ValueError:
+            self.curve_preview.setData([], [])
+            self.plot_preview.setTitle('序列预览（无有效数据）')
+            return
+        indices = np.arange(1, len(values) + 1, dtype=float)
+        self.curve_preview.setData(indices, values)
+        self.plot_preview.setTitle(
+            f'序列预览（共 {len(values)} 个点）', size='12pt'
+        )
+
+    def on_ok(self):
+        try:
+            values = parse_custom_iv_values(self.editor.toPlainText())
+        except ValueError as exc:
+            QMessageBox.warning(self, '自定义电压序列错误', str(exc))
+            return
+        self.sequence_text = self.editor.toPlainText().strip()
+        self.values = values
+        self.accept()
 
 
 def default_iv_gate_settings():
@@ -517,6 +630,13 @@ class IV_Measurement:
             segments.append((_2, seg2))
             segments.append((_3, seg3))
 
+        elif self.mode == 'custom':
+            values = np.asarray(self.params['custom_voltages'], dtype=float)
+            segments.append((_0, values))
+
+        else:
+            raise ValueError(f'未知IV扫描模式：{self.mode}')
+
         return segments
 
     def connect(self):
@@ -548,10 +668,14 @@ class IV_Measurement:
         k = self.keithley
         validate_nplc(self.params['nplc'])
         validate_terminal(self.params['terminal'])
-        validate_source_voltage(self.params['v_start'], 'IV起始电压')
-        validate_source_voltage(self.params['v_end'], 'IV终止电压')
-        validate_positive_step(self.params['v_step'], 'IV步长')
-        validate_program_step_plan('iv', self.params)
+        if self.mode == 'custom':
+            for index, voltage in enumerate(self.params['custom_voltages'], 1):
+                validate_source_voltage(voltage, f'自定义电压第{index}项')
+        else:
+            validate_source_voltage(self.params['v_start'], 'IV起始电压')
+            validate_source_voltage(self.params['v_end'], 'IV终止电压')
+            validate_positive_step(self.params['v_step'], 'IV步长')
+            validate_program_step_plan('iv', self.params)
         validate_current_range_limit(
             self.params['current_range'], self.params['i_limit'], '偏压'
         )
@@ -871,6 +995,15 @@ class IV_Measurement:
                                 )
                         elif self.mode == 'hysteresis':
                             self.measure_loop()
+                        elif self.mode == 'custom':
+                            self.measure_loop()
+                            more_work = (
+                                cycle < cycles or gate_index < total_gate
+                            )
+                            if more_work:
+                                self.safe_ramp_to_zero(
+                                    turn_off=False, fast=False
+                                )
                     except Exception as exc:
                         cycle_status = 'partial'
                         cycle_error = exc
@@ -1023,6 +1156,7 @@ class IVWidget(BaseAppWidget):
             _3: np.full(self.capacity, np.nan),
         }
         self.gate_settings = default_iv_gate_settings()
+        self.custom_iv_text = '-1, -0.5, 0, 0.5, 1'
         self.points_changed = False
 
         self.init_ui()
@@ -1189,50 +1323,94 @@ class IVWidget(BaseAppWidget):
 
         ctrl_group = QGroupBox("控制参数")
         ctrl_group.setFont(self.bold_font)
-        ctrl_grid = QGridLayout(ctrl_group)
+        ctrl_layout = QVBoxLayout(ctrl_group)
 
-        ctrl_items_left = [
-            ("起始电压 (V):", "v_start", "-1.0"),
-            ("终止电压 (V):", "v_end", "1.0"),
-            ("步长 (V) (正):", "v_step", "0.02"),
-            ("电流限制 (A):", "i_limit", "1.05e-6"),
-            ("稳定时间 (s):", "settle_time", "0.0")
-        ]
+        mode_grid = QGridLayout()
+        mode_label = QLabel('扫描模式:')
+        mode_label.setFont(self.ui_font)
+        mode_grid.addWidget(mode_label, 0, 0)
+        self.iv_mode_group = QButtonGroup(self)
+        mode_specs = (
+            ('rb_iv_single', 'Single（单向）', 'single', 0, 1),
+            ('rb_iv_bidirectional', 'Bidirectional（双向）', 'bidirectional', 0, 2),
+            ('rb_iv_hysteresis', 'Hysteresis（回滞）', 'hysteresis', 1, 1),
+            ('rb_iv_custom', '自定义序列（Custom）', 'custom', 1, 2),
+        )
+        for attr, title, mode, row, column in mode_specs:
+            button = QRadioButton(title)
+            button.setFont(self.ui_font)
+            button.setStyleSheet('font-weight: normal;')
+            button.setProperty('iv_mode', mode)
+            self.iv_mode_group.addButton(button)
+            setattr(self, attr, button)
+            mode_grid.addWidget(button, row, column)
+            button.toggled.connect(self.refresh_iv_mode_controls)
+        self.rb_iv_single.setChecked(True)
+        ctrl_layout.addLayout(mode_grid)
 
-        ctrl_items_right = [
-            ("NPLC:", "nplc", "1.0"),
-            ("电流量程 (A 或 AUTO):", "current_range", "1e-6"),
-            ("循环次数 (Cycles):", "cycles", "1"),
-            ("扫描模式:", "mode", ""),
-            ("", "", "")
-        ]
+        self.iv_mode_stack = QStackedWidget()
+        range_page = QWidget()
+        range_grid = QGridLayout(range_page)
+        range_grid.setContentsMargins(0, 0, 0, 0)
+        self.lbl_v_start = QLabel('起始电压 (V):')
+        self.lbl_v_end = QLabel('终止电压 (V):')
+        self.lbl_v_step = QLabel('扫描步长 (V) (正):')
+        for label in (self.lbl_v_start, self.lbl_v_end, self.lbl_v_step):
+            label.setFont(self.ui_font)
+        for key, default in (
+            ('v_start', '-1.0'), ('v_end', '1.0'), ('v_step', '0.02')
+        ):
+            self.inputs[key] = QLineEdit(default)
+            self.inputs[key].setFont(self.ui_font)
+        range_grid.addWidget(self.lbl_v_start, 0, 0)
+        range_grid.addWidget(self.inputs['v_start'], 0, 1)
+        range_grid.addWidget(self.lbl_v_end, 0, 2)
+        range_grid.addWidget(self.inputs['v_end'], 0, 3)
+        range_grid.addWidget(self.lbl_v_step, 1, 0)
+        range_grid.addWidget(self.inputs['v_step'], 1, 1)
+        self.lbl_iv_path = QLabel('')
+        self.lbl_iv_path.setFont(self.ui_font)
+        self.lbl_iv_path.setWordWrap(True)
+        self.lbl_iv_path.setStyleSheet('font-weight: normal; color: #555555;')
+        range_grid.addWidget(self.lbl_iv_path, 1, 2, 1, 2)
+        self.iv_mode_stack.addWidget(range_page)
 
-        for r in range(5):
-            lbl_l_txt, key_l, def_l = ctrl_items_left[r]
-            lbl_l = QLabel(lbl_l_txt)
-            lbl_l.setFont(self.ui_font)
-            ent_l = QLineEdit(def_l)
-            ent_l.setFont(self.ui_font)
-            ctrl_grid.addWidget(lbl_l, r, 0)
-            ctrl_grid.addWidget(ent_l, r, 1)
-            self.inputs[key_l] = ent_l
+        custom_page = QWidget()
+        custom_grid = QGridLayout(custom_page)
+        custom_grid.setContentsMargins(0, 0, 0, 0)
+        self.btn_custom_iv = QPushButton('打开自定义电压序列编辑器')
+        self.btn_custom_iv.setFont(self.bold_font)
+        self.btn_custom_iv.setStyleSheet('color: #B35A00;')
+        self.btn_custom_iv.clicked.connect(self.open_custom_iv_editor)
+        custom_grid.addWidget(self.btn_custom_iv, 0, 0)
+        self.lbl_custom_iv_summary = QLabel('')
+        self.lbl_custom_iv_summary.setFont(self.ui_font)
+        self.lbl_custom_iv_summary.setStyleSheet(
+            'font-weight: normal; color: #005500;'
+        )
+        custom_grid.addWidget(self.lbl_custom_iv_summary, 0, 1)
+        custom_grid.setColumnStretch(1, 1)
+        self.iv_mode_stack.addWidget(custom_page)
+        ctrl_layout.addWidget(self.iv_mode_stack)
 
-            lbl_r_txt, key_r, def_r = ctrl_items_right[r]
-            if lbl_r_txt:
-                lbl_r = QLabel(lbl_r_txt)
-                lbl_r.setFont(self.ui_font)
-                ctrl_grid.addWidget(lbl_r, r, 2)
-                if key_r == "mode":
-                    self.mode_combo = NoScrollComboBox()
-                    self.mode_combo.setFont(self.ui_font)
-                    self.mode_combo.addItems(['single', 'bidirectional', 'hysteresis'])
-                    ctrl_grid.addWidget(self.mode_combo, r, 3)
-                    self.inputs['mode'] = self.mode_combo
-                else:
-                    ent_r = QLineEdit(def_r)
-                    ent_r.setFont(self.ui_font)
-                    ctrl_grid.addWidget(ent_r, r, 3)
-                    self.inputs[key_r] = ent_r
+        common_grid = QGridLayout()
+        common_items = (
+            ('电流限制 (A):', 'i_limit', '1.05e-6', 0, 0),
+            ('NPLC:', 'nplc', '1.0', 0, 2),
+            ('稳定时间 (s):', 'settle_time', '0.0', 1, 0),
+            ('电流量程 (A 或 AUTO):', 'current_range', '1e-6', 1, 2),
+            ('循环次数 (Cycles):', 'cycles', '1', 2, 0),
+        )
+        for text, key, default, row, column in common_items:
+            label = QLabel(text)
+            label.setFont(self.ui_font)
+            control = QLineEdit(default)
+            control.setFont(self.ui_font)
+            common_grid.addWidget(label, row, column)
+            common_grid.addWidget(control, row, column + 1)
+            self.inputs[key] = control
+        ctrl_layout.addLayout(common_grid)
+        self.refresh_iv_mode_controls()
 
         scroll_content_layout.addWidget(ctrl_group)
 
@@ -1323,6 +1501,70 @@ class IVWidget(BaseAppWidget):
         btn_layout.addWidget(self.force_stop_btn)
 
         right_layout.addWidget(btn_widget)
+
+    def selected_iv_mode(self):
+        for button in (
+            self.rb_iv_single,
+            self.rb_iv_bidirectional,
+            self.rb_iv_hysteresis,
+            self.rb_iv_custom,
+        ):
+            if button.isChecked():
+                return str(button.property('iv_mode'))
+        return 'single'
+
+    def set_iv_mode(self, mode):
+        button = {
+            'single': self.rb_iv_single,
+            'bidirectional': self.rb_iv_bidirectional,
+            'hysteresis': self.rb_iv_hysteresis,
+            'custom': self.rb_iv_custom,
+        }.get(str(mode), self.rb_iv_single)
+        button.setChecked(True)
+        self.refresh_iv_mode_controls()
+
+    def refresh_iv_mode_controls(self):
+        if not hasattr(self, 'iv_mode_stack'):
+            return
+        mode = self.selected_iv_mode()
+        self.iv_mode_stack.setCurrentIndex(1 if mode == 'custom' else 0)
+        if mode == 'hysteresis':
+            self.lbl_v_start.setText('目标电压一 (V):')
+            self.lbl_v_end.setText('目标电压二 (V):')
+            self.lbl_iv_path.setText(
+                '路径：0 → V1 → V2 → V1 → 0'
+            )
+        else:
+            self.lbl_v_start.setText('起始电压 (V):')
+            self.lbl_v_end.setText('终止电压 (V):')
+            self.lbl_iv_path.setText(
+                '路径：起始 → 终止 → 起始'
+                if mode == 'bidirectional' else
+                '路径：起始 → 终止'
+            )
+        self._update_custom_iv_summary()
+
+    def _update_custom_iv_summary(self):
+        if not hasattr(self, 'lbl_custom_iv_summary'):
+            return
+        try:
+            count = len(parse_custom_iv_values(self.custom_iv_text))
+            self.lbl_custom_iv_summary.setText(
+                f'当前电压序列点数：{count}'
+            )
+        except ValueError as exc:
+            self.lbl_custom_iv_summary.setText(f'电压序列无效：{exc}')
+
+    def open_custom_iv_editor(self):
+        dialog = IVCustomVoltageDialog(
+            self.custom_iv_text,
+            self,
+            self.ui_font,
+            self.bold_font,
+        )
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.custom_iv_text = dialog.sequence_text
+            self._update_custom_iv_summary()
 
     def open_gate_settings(self):
         try:
@@ -1426,21 +1668,42 @@ class IVWidget(BaseAppWidget):
             instrument = self.instrument_settings.snapshot(
                 require_gate=gate_enabled
             )
+            mode = self.selected_iv_mode()
             params = {
                 'address': instrument['bias_address'],
-                'v_start': float(p['v_start']),
-                'v_end': float(p['v_end']),
-                'v_step': float(p['v_step']),
                 'i_limit': float(p['i_limit']),
                 'settle_time': float(p['settle_time']),
                 'nplc': float(p['nplc']),
                 'terminal': instrument['bias_terminal'],
-                'cycles': int(p['cycles'])
+                'cycles': int(p['cycles']),
+                'mode': mode,
             }
-            if params['v_step'] <= 0:
-                raise ValueError("步长必须为正值")
-            if params['v_start'] == params['v_end']:
-                raise ValueError("起止电压不能相等")
+            if mode == 'custom':
+                custom_voltages = parse_custom_iv_values(
+                    self.custom_iv_text
+                )
+                if len(custom_voltages) > self.capacity:
+                    raise ValueError(
+                        f'自定义电压序列最多支持 {self.capacity} 个点'
+                    )
+                params.update({
+                    'custom_voltage_text': self.custom_iv_text,
+                    'custom_voltages': custom_voltages,
+                    'v_start': custom_voltages[0],
+                    'v_end': custom_voltages[-1],
+                    # Only used by the existing final safety-zero routine.
+                    'v_step': 0.01,
+                })
+            else:
+                params.update({
+                    'v_start': float(p['v_start']),
+                    'v_end': float(p['v_end']),
+                    'v_step': float(p['v_step']),
+                })
+                if params['v_step'] <= 0:
+                    raise ValueError("步长必须为正值")
+                if params['v_start'] == params['v_end']:
+                    raise ValueError("起止电压不能相等")
             if params['cycles'] <= 0:
                 raise ValueError("循环次数必须大于 0")
             if params['settle_time'] < 0:
@@ -1454,10 +1717,10 @@ class IVWidget(BaseAppWidget):
             params['current_range'] = r_val if r_val.upper() == 'AUTO' else float(r_val)
             if not isinstance(params['current_range'], str) and params['current_range'] <= 0:
                 raise ValueError("电流量程必须大于 0 或为 AUTO")
-            params['mode'] = p['mode']
             params['file_prefix'] = p['file_prefix']
             params['folder'] = self.folder_input.text().strip()
-            validate_program_step_plan('iv', params)
+            if mode != 'custom':
+                validate_program_step_plan('iv', params)
             params['gate_enabled'] = gate_enabled
             if params['gate_enabled']:
                 gate = self.current_gate_settings()
@@ -1537,11 +1800,20 @@ class IVWidget(BaseAppWidget):
             self.legend.addItem(self.curves[_1], 'Reverse')
         elif mode == 'hysteresis':
             colors = {0: 'g', 1: 'r', 2: 'b', 3: 'm'}
-            labels = {0: '0→V_start', 1: 'V_start→V_end', 2: 'V_end→V_start', 3: 'V_start→0'}
+            labels = {
+                0: '0→目标电压一',
+                1: '目标电压一→目标电压二',
+                2: '目标电压二→目标电压一',
+                3: '目标电压一→0',
+            }
             for i in range(4):
                 self.curves[i].setPen(pg.mkPen(colors[i], width=1.5))
                 self.curves[i].show()
                 self.legend.addItem(self.curves[i], labels[i])
+        elif mode == 'custom':
+            self.curves[_0].setPen(pg.mkPen('r', width=1.5))
+            self.curves[_0].show()
+            self.legend.addItem(self.curves[_0], 'Custom sequence')
 
         while not self.update_queue.empty():
             self.update_queue.get()
@@ -1639,14 +1911,15 @@ class IVWidget(BaseAppWidget):
                 requested_vg, actual_vg = msg[6], msg[7]
                 snapshot = msg[8]
                 counts = snapshot['counts']
+                active = dict(getattr(self, 'active_params', {}))
                 self.submit_save(
                     self.save_data,
                     self.folder_input.text().strip(),
                     self.inputs['file_prefix'].text().strip() or 'IV',
-                    self.inputs['mode'].currentText(),
-                    float(self.inputs['v_start'].text()),
-                    float(self.inputs['v_end'].text()),
-                    abs(float(self.inputs['v_step'].text())),
+                    active.get('mode', self.selected_iv_mode()),
+                    float(active.get('v_start', 0.0)),
+                    float(active.get('v_end', 0.0)),
+                    abs(float(active.get('v_step', 0.01))),
                     snapshot['voltage'],
                     snapshot['current'],
                     snapshot['gate_current'],
@@ -1655,17 +1928,13 @@ class IVWidget(BaseAppWidget):
                     status,
                     error,
                     gate_enabled=bool(
-                        getattr(self, 'active_params', {}).get(
-                            'gate_enabled', False
-                        )
+                        active.get('gate_enabled', False)
                     ),
                     gate_index=gate_index,
                     gate_total=gate_total,
                     requested_vg=requested_vg,
                     actual_vg=actual_vg,
-                    gate_metadata=dict(
-                        getattr(self, 'active_params', {})
-                    ),
+                    gate_metadata=active,
                     stopped_at_local=time.strftime('%Y-%m-%d %H:%M:%S'),
                 )
                 continue
@@ -1777,6 +2046,15 @@ class IVWidget(BaseAppWidget):
                 'iv_mode': mode,
                 'cycle': current_cycle,
             }
+            if mode == 'custom':
+                metadata_extra.update({
+                    'custom_voltage_text': gate_metadata.get(
+                        'custom_voltage_text', ''
+                    ),
+                    'custom_voltages': gate_metadata.get(
+                        'custom_voltages', []
+                    ),
+                })
             if gate_enabled:
                 save_prefix = (
                     f'{prefix}_VgSeq{int(gate_index):03d}_'
@@ -1880,6 +2158,18 @@ class IVWidget(BaseAppWidget):
                     write_segment(full_path, idx)
                     saved_paths.append(str(full_path))
                 self.post_log(f"第 {current_cycle} 轮四段回滞数据安全保存。")
+
+            elif mode == 'custom':
+                point_count = counts[_0]
+                f = allocate_unique_path(
+                    folder,
+                    f'{save_prefix}_custom_{point_count}points_{s_cyc}.txt',
+                )
+                write_segment(f, _0)
+                saved_paths.append(str(f))
+                self.post_log(
+                    f'第 {current_cycle} 轮自定义序列数据安全落盘至: {f}'
+                )
             return {
                 'paths': saved_paths, 'status': status, 'error': error,
             }

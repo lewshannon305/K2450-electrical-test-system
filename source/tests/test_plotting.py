@@ -314,6 +314,26 @@ class PlotRenderingTests(unittest.TestCase):
             for segment in range(1, 5):
                 self.assertIn(f'Segment {segment}:', svg)
 
+    def test_iv_custom_sequence_renders_in_entered_order(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'IV_custom_6points_cyc1.txt'
+            voltage = np.array([-1.0, 0.2, -0.4, 0.8, 0.8, 0.0])
+            np.savetxt(
+                path,
+                np.column_stack([voltage, voltage * 1e-6]),
+                header='Voltage Current',
+            )
+            settings = default_plot_settings()
+            settings['modules']['iv_curve']['formats'] = ['svg']
+            outputs = render_result({
+                'run_id': 'ivcustom',
+                'module_id': 'iv_curve',
+                'status': 'complete',
+                'data_files': [str(path)],
+            }, settings)
+            self.assertEqual(len(outputs), 1)
+            self.assertTrue(Path(outputs[0]).exists())
+
 
 if __name__ == '__main__':
     unittest.main()
