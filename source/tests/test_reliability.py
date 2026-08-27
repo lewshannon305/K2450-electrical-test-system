@@ -304,6 +304,23 @@ class GlobalInstrumentSelectionTests(unittest.TestCase):
         finally:
             page.close()
 
+    def test_scan_and_detect_buttons_align_with_selector_edges(self):
+        page = WelcomePage(InstrumentSettings())
+        page.resize(1200, 700)
+        page.show()
+        self.app.processEvents()
+        try:
+            self.assertEqual(
+                page.btn_scan.geometry().right(),
+                page.bias_address.geometry().right(),
+            )
+            self.assertEqual(
+                page.btn_detect.geometry().left(),
+                page.bias_terminal.geometry().left(),
+            )
+        finally:
+            page.close()
+
     def test_detection_statuses_for_one_two_and_failed_meter(self):
         idn = 'KEITHLEY INSTRUMENTS,MODEL 2450,1,1'
         bias = 'GPIB0::1::INSTR'

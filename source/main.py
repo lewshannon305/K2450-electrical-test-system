@@ -230,12 +230,12 @@ class WelcomePage(QWidget):
         self.btn_detect.setFixedSize(100, 30)
         self.btn_detect.clicked.connect(self.detect_connections)
 
-        buttons = QHBoxLayout()
-        buttons.addStretch()
-        buttons.addWidget(self.btn_scan)
-        buttons.addWidget(self.btn_detect)
-        buttons.addStretch()
-        grid.addLayout(buttons, 2, 0, 1, 4)
+        grid.addWidget(
+            self.btn_scan, 2, 1, alignment=Qt.AlignmentFlag.AlignRight
+        )
+        grid.addWidget(
+            self.btn_detect, 2, 2, alignment=Qt.AlignmentFlag.AlignLeft
+        )
         grid.addWidget(self.summary_status, 3, 0, 1, 4)
 
         self.bias_address.currentTextChanged.connect(self._selection_changed)
