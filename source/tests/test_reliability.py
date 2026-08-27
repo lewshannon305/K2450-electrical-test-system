@@ -862,7 +862,7 @@ class IVScanModeTests(unittest.TestCase):
         app = QApplication.instance() or QApplication([])
         widget = IVWidget()
         try:
-            widget.resize(900, 800)
+            widget.resize(1920, 800)
             widget.show()
             app.processEvents()
             self.assertFalse(hasattr(widget, 'mode_combo'))
@@ -879,6 +879,14 @@ class IVScanModeTests(unittest.TestCase):
             self.assertEqual(
                 widget.inputs['v_end'].mapToGlobal(QPoint()).x(),
                 widget.inputs['nplc'].mapToGlobal(QPoint()).x(),
+            )
+            self.assertEqual(
+                widget.rb_iv_bidirectional.mapToGlobal(QPoint()).x(),
+                widget.lbl_v_end.mapToGlobal(QPoint()).x(),
+            )
+            self.assertEqual(
+                widget.rb_iv_custom.mapToGlobal(QPoint()).x(),
+                widget.lbl_v_end.mapToGlobal(QPoint()).x(),
             )
             expected = {
                 'single': widget.rb_iv_single,

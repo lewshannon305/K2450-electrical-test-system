@@ -1326,44 +1326,36 @@ class IVWidget(BaseAppWidget):
         scan_layout = QVBoxLayout(scan_group)
         scan_layout.setContentsMargins(12, 18, 12, 12)
 
-        mode_rows = QVBoxLayout()
-        mode_rows.setContentsMargins(0, 0, 0, 0)
-        self.iv_mode_group = QButtonGroup(self)
-        mode_specs = (
-            ('rb_iv_single', 'Single 单向', 'single'),
-            ('rb_iv_bidirectional', 'Bidirectional 双向', 'bidirectional'),
-            ('rb_iv_hysteresis', 'Hysteresis 回滞', 'hysteresis'),
-            ('rb_iv_custom', 'Custom 自定义', 'custom'),
-        )
-        mode_buttons = []
-        for attr, title, mode in mode_specs:
-            button = QRadioButton(title)
-            button.setFont(self.ui_font)
-            button.setStyleSheet('font-weight: normal;')
-            button.setProperty('iv_mode', mode)
-            self.iv_mode_group.addButton(button)
-            setattr(self, attr, button)
-            mode_buttons.append(button)
-            button.toggled.connect(self.refresh_iv_mode_controls)
-        for left_button, right_button in (
-            (mode_buttons[0], mode_buttons[1]),
-            (mode_buttons[2], mode_buttons[3]),
-        ):
-            row_layout = QHBoxLayout()
-            row_layout.setContentsMargins(0, 0, 0, 0)
-            row_layout.addWidget(left_button)
-            row_layout.addStretch(1)
-            row_layout.addWidget(right_button)
-            mode_rows.addLayout(row_layout)
-        self.rb_iv_single.setChecked(True)
-        scan_layout.addLayout(mode_rows)
-
         def align_parameter_grid(grid):
             grid.setColumnMinimumWidth(0, 150)
             grid.setColumnMinimumWidth(2, 150)
             grid.setColumnStretch(1, 1)
             grid.setColumnStretch(3, 1)
             grid.setHorizontalSpacing(10)
+
+        mode_grid = QGridLayout()
+        mode_grid.setContentsMargins(0, 0, 0, 0)
+        mode_grid.setColumnStretch(0, 1)
+        mode_grid.setColumnStretch(1, 1)
+        mode_grid.setHorizontalSpacing(10)
+        self.iv_mode_group = QButtonGroup(self)
+        mode_specs = (
+            ('rb_iv_single', 'Single 单向', 'single', 0, 0),
+            ('rb_iv_bidirectional', 'Bidirectional 双向', 'bidirectional', 0, 1),
+            ('rb_iv_hysteresis', 'Hysteresis 回滞', 'hysteresis', 1, 0),
+            ('rb_iv_custom', 'Custom 自定义', 'custom', 1, 1),
+        )
+        for attr, title, mode, row, column in mode_specs:
+            button = QRadioButton(title)
+            button.setFont(self.ui_font)
+            button.setStyleSheet('font-weight: normal;')
+            button.setProperty('iv_mode', mode)
+            self.iv_mode_group.addButton(button)
+            setattr(self, attr, button)
+            mode_grid.addWidget(button, row, column)
+            button.toggled.connect(self.refresh_iv_mode_controls)
+        self.rb_iv_single.setChecked(True)
+        scan_layout.addLayout(mode_grid)
 
         self.iv_mode_stack = QStackedWidget()
         range_page = QWidget()
