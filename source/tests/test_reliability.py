@@ -11,7 +11,8 @@ from unittest.mock import patch
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 import numpy as np
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QApplication, QFrame
 
 from core.hardware_base import (
     InstrumentConfigurationError,
@@ -243,6 +244,36 @@ class GlobalInstrumentSelectionTests(unittest.TestCase):
             page.scan_instruments()
         self.assertEqual(settings.bias_address, one)
         self.assertEqual(settings.gate_address, two)
+
+    def test_scanning_long_addresses_keeps_welcome_columns_equal(self):
+        settings = InstrumentSettings()
+        page = WelcomePage(settings)
+        page.resize(1200, 700)
+        page.show()
+        self.app.processEvents()
+        try:
+            frames = page.findChildren(
+                QFrame, options=Qt.FindChildOption.FindDirectChildrenOnly
+            )
+            self.assertEqual(len(frames), 2)
+            before = [frame.width() for frame in frames]
+
+            resources = [
+                'TCPIP0::192.168.100.250::inst0::INSTR',
+                'GPIB0::12345678901234567890::INSTR',
+            ]
+            with patch(
+                'main.pyvisa.ResourceManager',
+                return_value=FakeResourceManager(resources),
+            ):
+                page.scan_instruments()
+            self.app.processEvents()
+
+            after = [frame.width() for frame in frames]
+            self.assertEqual(before, after)
+            self.assertEqual(after[0], after[1])
+        finally:
+            page.close()
 
     def test_detection_statuses_for_one_two_and_failed_meter(self):
         idn = 'KEITHLEY INSTRUMENTS,MODEL 2450,1,1'

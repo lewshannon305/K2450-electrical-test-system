@@ -96,6 +96,9 @@ class WelcomePage(QWidget):
         layout.setSpacing(20)
 
         left = QFrame()
+        left.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding
+        )
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(20, 20, 20, 20)
         left_layout.setSpacing(10)
@@ -126,6 +129,9 @@ class WelcomePage(QWidget):
         left_layout.addStretch()
 
         right = QFrame()
+        right.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding
+        )
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(20, 20, 20, 20)
         right_layout.setSpacing(10)
@@ -176,7 +182,7 @@ class WelcomePage(QWidget):
         self.bias_address.setEditable(True)
         self.bias_address.setFont(ui_font)
         self.bias_address.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed
         )
         self.bias_terminal = QComboBox()
         self.bias_terminal.addItems(['REAR', 'FRONT'])
@@ -186,7 +192,7 @@ class WelcomePage(QWidget):
         self.gate_address.setEditable(True)
         self.gate_address.setFont(ui_font)
         self.gate_address.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed
         )
         self.gate_terminal = QComboBox()
         self.gate_terminal.addItems(['REAR', 'FRONT'])
@@ -195,6 +201,9 @@ class WelcomePage(QWidget):
         self.bias_status = QLabel('● 未选择')
         self.gate_status = QLabel('● 未选择（可选）')
         self.summary_status = QLabel('尚未选择仪器')
+        self.summary_status.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
         for label in (self.bias_status, self.gate_status, self.summary_status):
             label.setFont(ui_font)
 
