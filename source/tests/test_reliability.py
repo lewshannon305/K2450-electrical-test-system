@@ -1172,6 +1172,14 @@ class FileAndRawDataTests(unittest.TestCase):
         self.assertFalse(metadata['enabled'])
         np.testing.assert_array_equal(filtered, raw)
 
+    def test_line_filter_lazy_scipy_import_still_runs_full_fit(self):
+        times = np.arange(1000, dtype=float) / 1000.0
+        raw = 1e-6 + 2e-9 * np.sin(2 * np.pi * 50.0 * times)
+        filtered, metadata = _fit_line_harmonics(times, raw)
+        self.assertTrue(metadata['enabled'])
+        self.assertAlmostEqual(metadata['line_frequency_hz'], 50.0, places=2)
+        self.assertEqual(len(filtered), len(raw))
+
 
 class ItBufferTests(unittest.TestCase):
     def test_block_done_status_index_is_available(self):

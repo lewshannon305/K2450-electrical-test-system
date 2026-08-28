@@ -5,7 +5,6 @@ import time
 from pathlib import Path
 import numpy as np
 import pyvisa
-from scipy.optimize import minimize
 
 from PyQt6.QtWidgets import (
     QApplication,
@@ -346,6 +345,8 @@ def _fit_line_harmonics(times, currents, nominal_freq=50.0, search_hz=0.5, max_h
         return float(np.mean(drift_residual * drift_residual) / objective_scale)
 
     fixed_objective = drift_objective((line_freq, 0.0))
+    from scipy.optimize import minimize
+
     drift_result = minimize(
         drift_objective,
         np.array([line_freq, 0.0]),
