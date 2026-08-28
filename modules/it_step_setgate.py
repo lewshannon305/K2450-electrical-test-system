@@ -487,6 +487,7 @@ class ItMeasurement:
         self.gate_keithley = None
         self._buffer_created = False
         self._buffer_name = None
+        self._buffer_sequence = 0
 
     def connect(self):
         try:
@@ -701,8 +702,9 @@ class ItMeasurement:
     def _prepare_fast_buffer(self):
         if self._buffer_created:
             raise RuntimeError('上一个It高速缓冲区尚未清理')
+        self._buffer_sequence += 1
         self._buffer_name = (
-            f'it_{time.monotonic_ns() & 0xFFFFFFFFFFFF:x}'
+            f'it_{time.monotonic_ns() & 0xFFFFFFFFFF:x}_{self._buffer_sequence:x}'
         )
         if self.params['meas_mode'] == 'points':
             expected_points = int(self.params['num_points'])
