@@ -4,11 +4,11 @@
 
 > 本项目会直接控制源表输出。首次连接样品前，请先使用限流、低电压和空载条件验证接线、量程、端子与紧急停止流程。
 
-## 简易使用
+## 下载与简易使用
 
-下载 **ZIP** 并解压完整压缩包后，双击根目录的 `K2450电学测试系统.exe` 即可启动，不需要安装 Python，也不需要创建虚拟环境。
+普通 Windows 用户请前往 [Releases](https://github.com/lewshannon305/K2450-electrical-test-system/releases/latest) 下载 `K2450电学测试系统-Windows-x64.zip`。完整解压后双击 `K2450电学测试系统.exe` 即可启动，不需要安装 Python，也不需要创建虚拟环境。
 
-请保留 `runtime` 文件夹并让它与 EXE 位于同一目录；EXE 会调用其中的 Python 运行环境和第三方库。`configs` 是可查看、可编辑的配置文件，`source` 是完整 Python 源码。
+请保留压缩包中的 `runtime` 和 `configs` 文件夹，并让它们与 EXE 位于同一目录。绿色 **Code → Download ZIP** 下载的是可查看、可编辑的 Python 源码，不包含 Windows 可执行程序。
 
 ## 主要功能
 
@@ -54,10 +54,10 @@ python -m pip install --upgrade pip
 ### 3. 安装依赖
 
 ```powershell
-pip install -r source/requirements.txt
+pip install -r requirements.txt
 ```
 
-主要 Python 依赖包括 PyQt6、PyQtGraph、PyVISA、NumPy、SciPy、Matplotlib 和 Markdown，具体最低版本以 `source/requirements.txt` 为准。
+主要 Python 依赖包括 PyQt6、PyQtGraph、PyVISA、NumPy、SciPy、Matplotlib 和 Markdown，具体最低版本以 `requirements.txt` 为准。
 
 ### 4. 检查 VISA 连接
 
@@ -72,7 +72,7 @@ python -c "import pyvisa; print(pyvisa.ResourceManager().list_resources())"
 ### 5. 启动
 
 ```powershell
-python source/main.py
+python main.py
 ```
 
 ## 第一次测量
@@ -199,27 +199,25 @@ Keithley 2450 不具备专用 digitize 功能。采样速度和噪声取决于 N
 
 ```text
 K2450-electrical-test-system/
-├── K2450电学测试系统.exe       # 普通用户双击这里
-├── runtime/                    # EXE 需要的运行环境和依赖，不要删除
 ├── configs/                    # 平铺的默认、5T 和 9T 配置
-├── source/                     # 完整可编辑源码
-│   ├── main.py                 # 主窗口、导航、配置和绘图入口
-│   ├── requirements.txt        # Python 运行依赖
-│   ├── core/                   # 公共逻辑、硬件安全与绘图
-│   ├── modules/                # 七个测量模块
-│   ├── tests/                  # 自动化测试
-│   └── packaging/              # Windows 打包脚本
+├── core/                       # 公共逻辑、硬件安全与绘图
+├── modules/                    # 七个测量模块
+├── tests/                      # 自动化测试
+├── packaging/                  # Windows 打包与发布脚本
+├── .github/                    # GitHub Release 自动构建流程
+├── main.py                     # 主窗口、导航、配置和绘图入口
+├── requirements.txt            # Python 运行依赖
 └── Readme.md
 ```
 
-这个结构让普通用户下载整个仓库后直接运行，也让开发者在同一份仓库里查看和修改 Python 源码。更新程序时，EXE 与 `runtime` 必须作为一套一起更新。
+仓库主页只保留源码和配置。可直接运行的 EXE、`runtime` 与配置副本统一打包在 GitHub Releases 中，避免二进制文件混入源码历史。
 
 ## 运行测试
 
 测试使用模拟仪器与临时文件，不需要连接真实 2450：
 
 ```powershell
-python -m unittest discover -s source/tests -t source -v
+python -m unittest discover -s tests -t . -v
 ```
 
 ## 重新生成 Windows 版本
@@ -227,12 +225,12 @@ python -m unittest discover -s source/tests -t source -v
 开发电脑先安装源码依赖和 PyInstaller，然后从仓库根目录运行：
 
 ```powershell
-python -m pip install -r source/requirements.txt
+python -m pip install -r requirements.txt
 python -m pip install pyinstaller
-powershell -ExecutionPolicy Bypass -File source/packaging/build_windows.ps1
+powershell -ExecutionPolicy Bypass -File packaging/build_windows.ps1
 ```
 
-脚本会先运行测试，再将最新的 `K2450电学测试系统.exe` 和 `runtime` 更新到仓库根目录。提交并推送这两项后，GitHub 的 **Download ZIP** 就会同时包含最新源码和最新可运行程序。
+脚本会先运行测试，再在 `.build/release` 中生成 `K2450电学测试系统-Windows-x64.zip`，不会把 EXE 或 `runtime` 写入源码根目录。推送普通提交只更新源码；推送 `v*` 版本标签时，GitHub 会自动构建并发布新的 Release。
 
 ## 常见问题
 

@@ -1,0 +1,50 @@
+name: Build Windows release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller
+
+      - name: Test and build Windows archive
+        shell: pwsh
+        run: ./packaging/build_windows.ps1
+
+      - name: Keep manually built archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: K2450-Windows-x64
+          path: .build/release/K2450电学测试系统-Windows-x64.zip
+          if-no-files-found: error
+
+      - name: Publish tagged release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" ".build/release/K2450电学测试系统-Windows-x64.zip" --title "K2450 电学测试系统 ${{ github.ref_name }}" --generate-notes

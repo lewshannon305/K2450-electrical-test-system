@@ -3,9 +3,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# PyInstaller uses compiled Python extension modules inside runtime.
-!runtime/*.pyd
-!runtime/**/*.pyd
+# Compiled Windows releases belong in GitHub Releases, not the source tree.
+runtime/
+*.exe
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -20,6 +20,7 @@ env/
 .build/
 build/
 dist/
+*.zip
 *.egg-info/
 
 # IDE and operating-system files
