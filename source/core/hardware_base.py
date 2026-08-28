@@ -184,7 +184,7 @@ def validate_program_step_plan(program, params):
                 validate_step_divides_interval(
                     0, params[f'{prefix}_target'], ramp_step, f'{name}爬坡'
                 )
-            else:
+            elif params[f'{prefix}_mode'] == 'step':
                 test_step = params[f'{prefix}_test_step']
                 validate_step_divides_interval(
                     0, params[f'{prefix}_start'], ramp_step, f'{name}到起点的爬坡'
@@ -195,6 +195,24 @@ def validate_program_step_plan(program, params):
                 )
                 validate_step_divides_interval(
                     0, test_step, ramp_step, f'{name}相邻测量点间的爬坡'
+                )
+            elif params[f'{prefix}_mode'] == 'custom':
+                targets = params[f'{prefix}_targets']
+                previous = 0.0
+                for index, target in enumerate(targets, 1):
+                    validate_step_divides_interval(
+                        previous,
+                        target,
+                        ramp_step,
+                        f'{name}自定义序列第{index}项爬坡',
+                    )
+                    previous = target
+                validate_step_divides_interval(
+                    previous, 0.0, ramp_step, f'{name}自定义序列归零'
+                )
+            else:
+                raise ValueError(
+                    f'{name}模式无效：{params[f"{prefix}_mode"]}'
                 )
     elif program == 'arbitrary_bias':
         for index, (voltage, _duration) in enumerate(params['waveform'], 1):

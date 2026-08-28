@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import time
 from pathlib import Path
 import numpy as np
@@ -24,6 +25,8 @@ from PyQt6.QtWidgets import (
     QRadioButton,
     QButtonGroup,
     QSizePolicy,
+    QDialog,
+    QPlainTextEdit,
 )
 from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtGui import QFont
@@ -72,6 +75,159 @@ from core.utils import (
 
 
 MAX_BUFFER_POINTS = 1_000_000
+
+
+def parse_it_voltage_sequence(text, label='自定义电压'):
+    tokens = [
+        token
+        for token in re.split(r'[\s,;，；]+', str(text).strip())
+        if token
+    ]
+    if not tokens:
+        raise ValueError(f'{label}序列不能为空')
+    values = []
+    for index, token in enumerate(tokens, 1):
+        try:
+            value = float(token)
+        except ValueError as exc:
+            raise ValueError(
+                f'{label}第{index}项不是有效数字：{token}'
+            ) from exc
+        if not np.isfinite(value):
+            raise ValueError(f'{label}第{index}项必须为有限数')
+        validate_source_voltage(value, f'{label}第{index}项')
+        values.append(float(value))
+    return values
+
+
+def build_it_voltage_targets(params, prefix, enabled=True):
+    if not enabled:
+        return [0.0]
+    mode = params[f'{prefix}_mode']
+    if mode == 'single':
+        return [float(params[f'{prefix}_target'])]
+    if mode == 'step':
+        start = float(params[f'{prefix}_start'])
+        stop = float(params[f'{prefix}_end'])
+        step = float(params[f'{prefix}_test_step'])
+        count = int(round(abs(stop - start) / step)) + 1
+        return np.linspace(start, stop, count).tolist()
+    if mode == 'custom':
+        values = params.get(f'{prefix}_targets')
+        if values is None:
+            values = parse_it_voltage_sequence(
+                params.get(f'{prefix}_custom_text', ''),
+                '自定义栅压' if prefix == 'g' else '自定义偏压',
+            )
+        if not values:
+            label = '自定义栅压' if prefix == 'g' else '自定义偏压'
+            raise ValueError(f'{label}序列不能为空')
+        return [float(value) for value in values]
+    raise ValueError(f'未知的It电压模式：{mode}')
+
+
+class ItCustomVoltageDialog(QDialog):
+    def __init__(
+        self,
+        title,
+        voltage_label,
+        text,
+        parent=None,
+        ui_font=None,
+        bold_font=None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(1000, 600)
+        self.setWindowFlags(
+            self.windowFlags()
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowMaximizeButtonHint
+        )
+        self.voltage_label = voltage_label
+        self.ui_font = ui_font or QFont('Arial', 12)
+        self.bold_font = bold_font or QFont('Arial', 12)
+        self.bold_font.setWeight(QFont.Weight.Bold)
+        self.sequence_text = str(text)
+        self.values = []
+
+        main_layout = QHBoxLayout(self)
+        left_group = QGroupBox('电压序列')
+        left_group.setFont(self.bold_font)
+        left_layout = QVBoxLayout(left_group)
+        self.editor = QPlainTextEdit(self.sequence_text)
+        self.editor.setFont(self.ui_font)
+        self.editor.setPlaceholderText(
+            '请输入电压值，使用逗号、空格、分号、Tab或换行分隔。\n'
+            '例如：-1, -0.5, 0, 0.5, 1'
+        )
+        self.editor.textChanged.connect(self.update_preview)
+        left_layout.addWidget(self.editor)
+        main_layout.addWidget(left_group, stretch=2)
+
+        right_group = QGroupBox('序列预览')
+        right_group.setFont(self.bold_font)
+        right_layout = QVBoxLayout(right_group)
+        self.graph_widget = pg.GraphicsLayoutWidget()
+        right_layout.addWidget(self.graph_widget)
+        self.plot_preview = self.graph_widget.addPlot()
+        self.plot_preview.setLabel(
+            'left', text=voltage_label, units='V',
+            **{'color': '#000', 'font-size': '11pt'},
+        )
+        self.plot_preview.setLabel(
+            'bottom', text='Point index',
+            **{'color': '#000', 'font-size': '11pt'},
+        )
+        self.plot_preview.showGrid(x=True, y=True, alpha=0.4)
+        self.curve_preview = self.plot_preview.plot(
+            pen=pg.mkPen('r', width=2.0),
+        )
+
+        button_layout = QHBoxLayout()
+        btn_cancel = QPushButton('取消')
+        btn_cancel.setFont(self.bold_font)
+        btn_cancel.setFixedSize(100, 30)
+        btn_cancel.clicked.connect(self.reject)
+        btn_ok = QPushButton('确认')
+        btn_ok.setFont(self.bold_font)
+        btn_ok.setFixedSize(100, 30)
+        btn_ok.setStyleSheet('color: #AA0000;')
+        btn_ok.clicked.connect(self.on_ok)
+        button_layout.addStretch()
+        button_layout.addWidget(btn_cancel)
+        button_layout.addWidget(btn_ok)
+        right_layout.addLayout(button_layout)
+        main_layout.addWidget(right_group, stretch=3)
+        self.update_preview()
+
+    def update_preview(self):
+        try:
+            values = parse_it_voltage_sequence(
+                self.editor.toPlainText(), self.voltage_label
+            )
+        except ValueError:
+            self.curve_preview.setData([], [])
+            self.plot_preview.setTitle('序列预览（无有效数据）')
+            return
+        self.curve_preview.setData(
+            np.arange(1, len(values) + 1, dtype=float), values
+        )
+        self.plot_preview.setTitle(
+            f'序列预览（共 {len(values)} 个点）', size='12pt'
+        )
+
+    def on_ok(self):
+        try:
+            values = parse_it_voltage_sequence(
+                self.editor.toPlainText(), self.voltage_label
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, '自定义电压序列错误', str(exc))
+            return
+        self.sequence_text = self.editor.toPlainText().strip()
+        self.values = values
+        self.accept()
 
 
 class PartialItAcquisitionError(RuntimeError):
@@ -363,12 +519,17 @@ class ItMeasurement:
             validate_positive_step(self.params['b_ramp_step'], '偏压爬坡步长')
             if self.params['b_mode'] == 'single':
                 validate_source_voltage(self.params['b_target'], '偏压目标')
-            else:
+            elif self.params['b_mode'] == 'step':
                 validate_source_voltage(self.params['b_start'], '偏压起点')
                 validate_source_voltage(self.params['b_end'], '偏压终点')
                 validate_positive_step(
                     self.params['b_test_step'], '偏压测试步长'
                 )
+            else:
+                for index, target in enumerate(
+                    self.params['b_targets'], 1
+                ):
+                    validate_source_voltage(target, f'自定义偏压第{index}项')
             validate_current_range_limit(
                 self.params['b_range'], self.params['b_ilimit'], '偏压'
             )
@@ -377,12 +538,19 @@ class ItMeasurement:
                 validate_positive_step(self.params['g_ramp_step'], '栅压爬坡步长')
                 if self.params['g_mode'] == 'single':
                     validate_source_voltage(self.params['g_target'], '栅压目标')
-                else:
+                elif self.params['g_mode'] == 'step':
                     validate_source_voltage(self.params['g_start'], '栅压起点')
                     validate_source_voltage(self.params['g_end'], '栅压终点')
                     validate_positive_step(
                         self.params['g_test_step'], '栅压测试步长'
                     )
+                else:
+                    for index, target in enumerate(
+                        self.params['g_targets'], 1
+                    ):
+                        validate_source_voltage(
+                            target, f'自定义栅压第{index}项'
+                        )
                 validate_current_range_limit('AUTO', self.params['g_ilimit'], '栅极')
             validate_program_step_plan('it', self.params)
             k_b = self.bias_keithley
@@ -879,24 +1047,18 @@ class ItMeasurement:
             self.connect()
             self.setup()
 
-            vg_list = [0.0]
-            if self.params['gate_enabled']:
-                if self.params['g_mode'] == 'single':
-                    vg_list = [self.params['g_target']]
-                else:
-                    gs, ge, gstep = self.params['g_start'], self.params['g_end'], self.params['g_test_step']
-                    if gstep > 0:
-                        num = int(round(abs(ge - gs) / gstep)) + 1
-                        vg_list = np.linspace(gs, ge, num).tolist()
-
-            vb_list = []
-            if self.params['b_mode'] == 'single':
-                vb_list = [self.params['b_target']]
-            else:
-                bs, be, bstep = self.params['b_start'], self.params['b_end'], self.params['b_test_step']
-                if bstep > 0:
-                    num = int(round(abs(be - bs) / bstep)) + 1
-                    vb_list = np.linspace(bs, be, num).tolist()
+            vg_list = build_it_voltage_targets(
+                self.params,
+                'g',
+                enabled=self.params['gate_enabled'],
+            )
+            vb_list = build_it_voltage_targets(self.params, 'b')
+            total_blocks = len(vg_list) * len(vb_list)
+            self.update_queue.put((
+                'log',
+                f'电压组合：栅压 {len(vg_list)} 点 × 偏压 '
+                f'{len(vb_list)} 点 = {total_blocks} 个It采集块',
+            ))
 
             if self.params['gate_enabled']:
                 self.gate_keithley.write(':OUTP ON')
@@ -923,7 +1085,7 @@ class ItMeasurement:
                     ):
                         break
 
-                for vb in vb_list:
+                for i_b, vb in enumerate(vb_list):
                     if self.stop_event.is_set() or self.force_stop_event.is_set():
                         break
 
@@ -944,11 +1106,33 @@ class ItMeasurement:
                         break
 
                     duration_str = f"{int(self.params['num_points'])}points" if self.params['meas_mode'] == 'points' else f"{self.params['duration']}s"
+                    position_suffix = ''
+                    if (
+                        self.params['g_mode'] == 'custom'
+                        or self.params['b_mode'] == 'custom'
+                    ):
+                        position_suffix = (
+                            f'_G{i_g + 1:03d}of{len(vg_list):03d}'
+                            f'_B{i_b + 1:03d}of{len(vb_list):03d}'
+                        )
                     fname = (
                         f"{self.params['prefix']}_"
                         f"{duration_str}"
+                        f"{position_suffix}"
                         f"_Vg={vg:.3f}V_Vb={vb:.3f}V.txt"
                     )
+                    sequence_metadata = {
+                        'gate_mode': self.params['g_mode'],
+                        'bias_mode': self.params['b_mode'],
+                        'gate_targets_V': [float(value) for value in vg_list],
+                        'bias_targets_V': [float(value) for value in vb_list],
+                        'gate_sequence_index': i_g + 1,
+                        'bias_sequence_index': i_b + 1,
+                        'gate_sequence_count': len(vg_list),
+                        'bias_sequence_count': len(vb_list),
+                        'combination_index': i_g * len(vb_list) + i_b + 1,
+                        'combination_count': total_blocks,
+                    }
                     reserved_path = allocate_unique_path(
                         self.params['output_folder'], fname
                     )
@@ -987,6 +1171,7 @@ class ItMeasurement:
                             reserved_path,
                             result_status,
                             result_error,
+                            sequence_metadata,
                         )
                     )
                     if result_status != 'complete' and result_error != '用户停止或强制终止':
@@ -1011,8 +1196,9 @@ class ItMeasurement:
 
                 if i_g < len(vg_list) - 1:
                     if not self._interruptible_sleep(
-                        self.params['g_post_zero_wait'],
-                        f"偏压归零后等待 ({self.params['g_post_zero_wait']}s)",
+                        self.params.get('g_post_zero_wait', 0.0),
+                        '偏压归零后等待 '
+                        f"({self.params.get('g_post_zero_wait', 0.0)}s)",
                     ):
                         break
 
@@ -1085,6 +1271,8 @@ class ItStepWidget(BaseAppWidget):
         self.points_changed = False
         self.current_folder = ''
         self.active_line_filter_mode = 'off'
+        self.custom_gate_text = '0, 0.5, 1.0'
+        self.custom_bias_text = '0.1, 0.2, 0.3'
 
         self.init_ui()
 
@@ -1264,11 +1452,16 @@ class ItStepWidget(BaseAppWidget):
         self.rb_g_step = QRadioButton('步进栅压模式')
         self.rb_g_step.setFont(self.ui_font)
         self.rb_g_step.setStyleSheet('font-weight: normal;')
+        self.rb_g_custom = QRadioButton('自定义栅压模式')
+        self.rb_g_custom.setFont(self.ui_font)
+        self.rb_g_custom.setStyleSheet('font-weight: normal;')
         self.bg_g_mode = QButtonGroup()
         self.bg_g_mode.addButton(self.rb_g_single)
         self.bg_g_mode.addButton(self.rb_g_step)
+        self.bg_g_mode.addButton(self.rb_g_custom)
         g_radio_hbox.addWidget(self.rb_g_single)
         g_radio_hbox.addWidget(self.rb_g_step)
+        g_radio_hbox.addWidget(self.rb_g_custom)
         g_radio_hbox.addStretch()
         gate_vbox.addLayout(g_radio_hbox)
 
@@ -1307,7 +1500,43 @@ class ItStepWidget(BaseAppWidget):
         add_param(gg_st, 4, 0, '栅电流限值 (A):', 'g_ilimit_st', '1e-9')
         gate_vbox.addWidget(self.wg_g_step)
 
+        self.wg_g_custom = QWidget()
+        gg_c = QGridLayout(self.wg_g_custom)
+        gg_c.setContentsMargins(0, 0, 0, 0)
+        self.btn_g_custom = QPushButton('打开自定义栅压序列编辑器')
+        self.btn_g_custom.setFont(self.bold_font)
+        self.btn_g_custom.setStyleSheet('color: #B35A00;')
+        self.btn_g_custom.clicked.connect(self.open_custom_gate_editor)
+        gg_c.addWidget(self.btn_g_custom, 0, 0, 1, 2)
+        self.lbl_g_custom_summary = QLabel('')
+        self.lbl_g_custom_summary.setFont(self.ui_font)
+        self.lbl_g_custom_summary.setWordWrap(True)
+        self.lbl_g_custom_summary.setStyleSheet(
+            'font-weight: normal; color: #005500;'
+        )
+        gg_c.addWidget(self.lbl_g_custom_summary, 0, 2, 1, 2)
+        add_param(
+            gg_c, 1, 0, '爬坡/归零步长 (V) (正):',
+            'g_ramp_step_c', '0.1',
+        )
+        add_param(
+            gg_c, 1, 2, '栅压单步延时 (s):',
+            'g_step_delay_c', '0.5',
+        )
+        add_param(
+            gg_c, 2, 0, '栅电流限值 (A):', 'g_ilimit_c', '1e-9'
+        )
+        add_param(
+            gg_c, 2, 2, '栅压到位等待 (s):', 'g_settle_c', '20.0'
+        )
+        add_param(
+            gg_c, 3, 0, '偏压归零后等待 (s):',
+            'g_post_zero_wait_c', '2.0',
+        )
+        gate_vbox.addWidget(self.wg_g_custom)
+
         self.wg_g_step.setVisible(False)
+        self.wg_g_custom.setVisible(False)
         self.bg_g_mode.buttonClicked.connect(self.toggle_g_mode)
         box_vbox.addWidget(self.gate_box)
         self.gate_box.setVisible(False)
@@ -1324,11 +1553,16 @@ class ItStepWidget(BaseAppWidget):
         self.rb_b_step = QRadioButton('步进偏压模式')
         self.rb_b_step.setFont(self.ui_font)
         self.rb_b_step.setStyleSheet('font-weight: normal;')
+        self.rb_b_custom = QRadioButton('自定义偏压模式')
+        self.rb_b_custom.setFont(self.ui_font)
+        self.rb_b_custom.setStyleSheet('font-weight: normal;')
         self.bg_b_mode = QButtonGroup()
         self.bg_b_mode.addButton(self.rb_b_single)
         self.bg_b_mode.addButton(self.rb_b_step)
+        self.bg_b_mode.addButton(self.rb_b_custom)
         b_radio_hbox.addWidget(self.rb_b_single)
         b_radio_hbox.addWidget(self.rb_b_step)
+        b_radio_hbox.addWidget(self.rb_b_custom)
         b_radio_hbox.addStretch()
         bias_vbox.addLayout(b_radio_hbox)
 
@@ -1358,9 +1592,65 @@ class ItStepWidget(BaseAppWidget):
         add_param(gb_st, 4, 2, '测量后保持时间 (s):', 'b_post_wait_st', '5.0')
         bias_vbox.addWidget(self.wg_b_step)
 
+        self.wg_b_custom = QWidget()
+        gb_c = QGridLayout(self.wg_b_custom)
+        gb_c.setContentsMargins(0, 0, 0, 0)
+        self.btn_b_custom = QPushButton('打开自定义偏压序列编辑器')
+        self.btn_b_custom.setFont(self.bold_font)
+        self.btn_b_custom.setStyleSheet('color: #B35A00;')
+        self.btn_b_custom.clicked.connect(self.open_custom_bias_editor)
+        gb_c.addWidget(self.btn_b_custom, 0, 0, 1, 2)
+        self.lbl_b_custom_summary = QLabel('')
+        self.lbl_b_custom_summary.setFont(self.ui_font)
+        self.lbl_b_custom_summary.setWordWrap(True)
+        self.lbl_b_custom_summary.setStyleSheet(
+            'font-weight: normal; color: #005500;'
+        )
+        gb_c.addWidget(self.lbl_b_custom_summary, 0, 2, 1, 2)
+        add_param(
+            gb_c, 1, 0, '爬坡/归零步长 (V) (正):',
+            'b_ramp_step_c', '0.001',
+        )
+        add_param(
+            gb_c, 1, 2, '偏压单步延时 (s):',
+            'b_step_delay_c', '0.01',
+        )
+        add_param(
+            gb_c, 2, 0, '偏压固定电流量程 (A):',
+            'b_range_c', '1e-6',
+        )
+        add_param(
+            gb_c, 2, 2, '偏压到位等待 (s):',
+            'b_settle_c', '2.0',
+        )
+        add_param(
+            gb_c, 3, 0, '偏压电流限制 (A):',
+            'b_ilimit_c', '1.05e-6',
+        )
+        add_param(
+            gb_c, 3, 2, '测量后保持时间 (s):',
+            'b_post_wait_c', '5.0',
+        )
+        bias_vbox.addWidget(self.wg_b_custom)
+
         self.wg_b_step.setVisible(False)
+        self.wg_b_custom.setVisible(False)
         self.bg_b_mode.buttonClicked.connect(self.toggle_b_mode)
         box_vbox.addWidget(bias_box)
+
+        self.lbl_combination_summary = QLabel('')
+        self.lbl_combination_summary.setFont(self.bold_font)
+        self.lbl_combination_summary.setWordWrap(True)
+        self.lbl_combination_summary.setStyleSheet('color: #0055A4;')
+        box_vbox.addWidget(self.lbl_combination_summary)
+
+        for key in (
+            'g_start', 'g_end', 'g_test_step',
+            'b_start', 'b_end', 'b_test_step',
+        ):
+            self.inputs[key].textChanged.connect(
+                self.update_combination_summary
+            )
 
         path_box = QGroupBox('文件保存路径')
         path_box.setFont(self.bold_font)
@@ -1447,20 +1737,111 @@ class ItStepWidget(BaseAppWidget):
         btn_hbox.addStretch()
         btn_hbox.addWidget(self.btn_force)
         right_layout.addWidget(btn_area)
+        self._update_custom_gate_summary()
+        self._update_custom_bias_summary()
+        self.update_combination_summary()
 
     def toggle_gate(self):
         self.gate_box.setVisible(self.cb_gate.isChecked())
         self.set_sampling_gate_available(self.cb_gate.isChecked())
+        if hasattr(self, 'lbl_combination_summary'):
+            self.update_combination_summary()
 
     def toggle_g_mode(self):
-        is_single = self.rb_g_single.isChecked()
-        self.wg_g_single.setVisible(is_single)
-        self.wg_g_step.setVisible(not is_single)
+        self.wg_g_single.setVisible(self.rb_g_single.isChecked())
+        self.wg_g_step.setVisible(self.rb_g_step.isChecked())
+        self.wg_g_custom.setVisible(self.rb_g_custom.isChecked())
+        self.update_combination_summary()
 
     def toggle_b_mode(self):
-        is_single = self.rb_b_single.isChecked()
-        self.wg_b_single.setVisible(is_single)
-        self.wg_b_step.setVisible(not is_single)
+        self.wg_b_single.setVisible(self.rb_b_single.isChecked())
+        self.wg_b_step.setVisible(self.rb_b_step.isChecked())
+        self.wg_b_custom.setVisible(self.rb_b_custom.isChecked())
+        self.update_combination_summary()
+
+    def _preview_mode_count(self, prefix):
+        if getattr(self, f'rb_{prefix}_single').isChecked():
+            return 1
+        if getattr(self, f'rb_{prefix}_step').isChecked():
+            start = float(self.inputs[f'{prefix}_start'].text())
+            stop = float(self.inputs[f'{prefix}_end'].text())
+            step = float(self.inputs[f'{prefix}_test_step'].text())
+            return validate_step_divides_interval(
+                start, stop, step, '预计测量步进'
+            ) + 1
+        text = (
+            self.custom_gate_text
+            if prefix == 'g'
+            else self.custom_bias_text
+        )
+        label = '自定义栅压' if prefix == 'g' else '自定义偏压'
+        return len(parse_it_voltage_sequence(text, label))
+
+    def update_combination_summary(self):
+        if not hasattr(self, 'lbl_combination_summary'):
+            return
+        try:
+            bias_count = self._preview_mode_count('b')
+            if self.cb_gate.isChecked():
+                gate_count = self._preview_mode_count('g')
+                text = (
+                    f'预计测量：栅压 {gate_count} 点 × 偏压 '
+                    f'{bias_count} 点 = {gate_count * bias_count} 个It采集块'
+                )
+            else:
+                text = f'预计测量：单表偏压 {bias_count} 点 = {bias_count} 个It采集块'
+        except (TypeError, ValueError):
+            text = '预计测量：当前电压参数尚未形成有效序列'
+        self.lbl_combination_summary.setText(text)
+
+    @staticmethod
+    def _sequence_summary(text, label):
+        try:
+            values = parse_it_voltage_sequence(text, label)
+        except ValueError as exc:
+            return f'序列无效：{exc}'
+        return (
+            f'当前序列：{len(values)} 点，'
+            f'{values[0]:g} → {values[-1]:g} V'
+        )
+
+    def _update_custom_gate_summary(self):
+        self.lbl_g_custom_summary.setText(
+            self._sequence_summary(self.custom_gate_text, '自定义栅压')
+        )
+        self.update_combination_summary()
+
+    def _update_custom_bias_summary(self):
+        self.lbl_b_custom_summary.setText(
+            self._sequence_summary(self.custom_bias_text, '自定义偏压')
+        )
+        self.update_combination_summary()
+
+    def open_custom_gate_editor(self):
+        dialog = ItCustomVoltageDialog(
+            '自定义栅压序列编辑器',
+            'Gate voltage',
+            self.custom_gate_text,
+            parent=self,
+            ui_font=self.ui_font,
+            bold_font=self.bold_font,
+        )
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.custom_gate_text = dialog.sequence_text
+            self._update_custom_gate_summary()
+
+    def open_custom_bias_editor(self):
+        dialog = ItCustomVoltageDialog(
+            '自定义偏压序列编辑器',
+            'Bias voltage',
+            self.custom_bias_text,
+            parent=self,
+            ui_font=self.ui_font,
+            bold_font=self.bold_font,
+        )
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.custom_bias_text = dialog.sequence_text
+            self._update_custom_bias_summary()
 
     def browse_folder(self):
         directory = QFileDialog.getExistingDirectory(self, '选择保存文件夹')
@@ -1517,7 +1898,11 @@ class ItStepWidget(BaseAppWidget):
                 'prefix': p['filename_prefix'],
             }
 
-            preset['g_mode'] = 'single' if self.rb_g_single.isChecked() else 'step'
+            preset['g_mode'] = (
+                'single' if self.rb_g_single.isChecked()
+                else 'step' if self.rb_g_step.isChecked()
+                else 'custom'
+            )
             if preset['g_mode'] == 'single':
                 preset['g_target'] = float(p['g_target_s'])
                 preset['g_ramp_step'] = float(p['g_ramp_step_s'])
@@ -1526,7 +1911,7 @@ class ItStepWidget(BaseAppWidget):
                 preset['g_step_delay'] = float(p['g_step_delay_s'])
                 preset['g_ilimit'] = float(p['g_ilimit_s'])
                 preset['g_settle'] = float(p['g_settle_s'])
-            else:
+            elif preset['g_mode'] == 'step':
                 preset['g_start'] = float(p['g_start'])
                 preset['g_end'] = float(p['g_end'])
                 preset['g_test_step'] = float(p['g_test_step'])
@@ -1539,8 +1924,29 @@ class ItStepWidget(BaseAppWidget):
                 preset['g_ilimit'] = float(p['g_ilimit_st'])
                 preset['g_settle'] = float(p['g_settle_st'])
                 preset['g_post_zero_wait'] = float(p['g_post_zero_wait'])
+            else:
+                preset['g_custom_text'] = self.custom_gate_text
+                preset['g_targets'] = parse_it_voltage_sequence(
+                    self.custom_gate_text, '自定义栅压'
+                )
+                preset['g_ramp_step'] = float(p['g_ramp_step_c'])
+                if preset['g_ramp_step'] <= 0:
+                    raise ValueError(
+                        '栅压爬坡步长必须为正值，当前值: '
+                        f'{p["g_ramp_step_c"]}'
+                    )
+                preset['g_step_delay'] = float(p['g_step_delay_c'])
+                preset['g_ilimit'] = float(p['g_ilimit_c'])
+                preset['g_settle'] = float(p['g_settle_c'])
+                preset['g_post_zero_wait'] = float(
+                    p['g_post_zero_wait_c']
+                )
 
-            preset['b_mode'] = 'single' if self.rb_b_single.isChecked() else 'step'
+            preset['b_mode'] = (
+                'single' if self.rb_b_single.isChecked()
+                else 'step' if self.rb_b_step.isChecked()
+                else 'custom'
+            )
             if preset['b_mode'] == 'single':
                 preset['b_target'] = float(p['b_target_s'])
                 preset['b_ramp_step'] = float(p['b_ramp_step_s'])
@@ -1551,7 +1957,7 @@ class ItStepWidget(BaseAppWidget):
                 preset['b_ilimit'] = float(p['b_ilimit_s'])
                 preset['b_settle'] = float(p['b_settle_s'])
                 preset['b_post_wait'] = float(p['b_post_wait_s'])
-            else:
+            elif preset['b_mode'] == 'step':
                 preset['b_start'] = float(p['b_start'])
                 preset['b_end'] = float(p['b_end'])
                 preset['b_test_step'] = float(p['b_test_step'])
@@ -1565,6 +1971,22 @@ class ItStepWidget(BaseAppWidget):
                 preset['b_ilimit'] = float(p['b_ilimit_st'])
                 preset['b_settle'] = float(p['b_settle_st'])
                 preset['b_post_wait'] = float(p['b_post_wait_st'])
+            else:
+                preset['b_custom_text'] = self.custom_bias_text
+                preset['b_targets'] = parse_it_voltage_sequence(
+                    self.custom_bias_text, '自定义偏压'
+                )
+                preset['b_ramp_step'] = float(p['b_ramp_step_c'])
+                if preset['b_ramp_step'] <= 0:
+                    raise ValueError(
+                        '偏压爬坡步长必须为正值，当前值: '
+                        f'{p["b_ramp_step_c"]}'
+                    )
+                preset['b_step_delay'] = float(p['b_step_delay_c'])
+                preset['b_range'] = p['b_range_c']
+                preset['b_ilimit'] = float(p['b_ilimit_c'])
+                preset['b_settle'] = float(p['b_settle_c'])
+                preset['b_post_wait'] = float(p['b_post_wait_c'])
 
             if preset['meas_mode'] == 'points':
                 if preset['num_points'] <= 0 or int(preset['num_points']) != preset['num_points']:
@@ -1772,6 +2194,7 @@ class ItStepWidget(BaseAppWidget):
                 filter_meta, fname = msg[_6], msg[_7]
                 result_status = msg[_8] if len(msg) > 8 else 'complete'
                 result_error = msg[9] if len(msg) > 9 else None
+                sequence_metadata = msg[10] if len(msg) > 10 else {}
                 self.note_result_status(result_status, result_error)
                 rate = (
                     (len(times) - 1) / (times[-1] - times[0])
@@ -1787,6 +2210,7 @@ class ItStepWidget(BaseAppWidget):
                     filtered_currents,
                     filter_meta,
                     fname,
+                    sequence_metadata,
                     status=result_status,
                     error=result_error,
                     gate_enabled=self.cb_gate.isChecked(),
@@ -1839,6 +2263,7 @@ class ItStepWidget(BaseAppWidget):
         filtered_currents,
         filter_meta,
         filename,
+        sequence_metadata=None,
         status='complete',
         error=None,
         gate_enabled=False,
@@ -1885,6 +2310,7 @@ class ItStepWidget(BaseAppWidget):
                 'filtered_data_column': 'BiasCurrentFiltered(A)',
                 'filter': filter_meta,
             }
+            metadata.update(sequence_metadata or {})
             write_result_metadata(
                 filepath,
                 status=status,

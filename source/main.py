@@ -695,6 +695,10 @@ class MainWindow(QMainWindow):
                         mod_data['__gate_settings__'] = dict(
                             widget.gate_settings
                         )
+                if hasattr(widget, 'custom_gate_text'):
+                    mod_data['custom_gate_text'] = widget.custom_gate_text
+                if hasattr(widget, 'custom_bias_text'):
+                    mod_data['custom_bias_text'] = widget.custom_bias_text
 
                 config_data['modules'][widget.module_id] = mod_data
 
@@ -750,6 +754,24 @@ class MainWindow(QMainWindow):
                     control = getattr(widget, attr_name, None)
                     if isinstance(control, (QCheckBox, QRadioButton)):
                         control.setChecked(bool(checked))
+                if hasattr(widget, 'custom_gate_text'):
+                    widget.custom_gate_text = str(
+                        mod_data.get(
+                            'custom_gate_text', widget.custom_gate_text
+                        )
+                    )
+                    widget._update_custom_gate_summary()
+                if hasattr(widget, 'custom_bias_text'):
+                    widget.custom_bias_text = str(
+                        mod_data.get(
+                            'custom_bias_text', widget.custom_bias_text
+                        )
+                    )
+                    widget._update_custom_bias_summary()
+                if hasattr(widget, 'toggle_g_mode'):
+                    widget.toggle_g_mode()
+                if hasattr(widget, 'toggle_b_mode'):
+                    widget.toggle_b_mode()
                 if hasattr(widget, 'rb_sample_triggered'):
                     mode = str(mod_data.get('acquisition_mode', 'triggered'))
                     widget.rb_sample_realtime.setChecked(mode == 'realtime')

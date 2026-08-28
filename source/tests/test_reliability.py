@@ -38,7 +38,14 @@ from core.hardware_base import (
     verify_current_configuration,
     write_result_metadata,
 )
-from modules.it_step_setgate import ItMeasurement, ItStepWidget, _8, _fit_line_harmonics
+from modules.it_step_setgate import (
+    ItMeasurement,
+    ItStepWidget,
+    _8,
+    _fit_line_harmonics,
+    build_it_voltage_targets,
+    parse_it_voltage_sequence,
+)
 from modules.isd_vg_setvsd import IsdVgMeasurement
 from modules.iv_curve import (
     IV_Measurement,
@@ -1182,7 +1189,7 @@ class ItBufferTests(unittest.TestCase):
             ':SYST:ERR?': '0,"No error"',
         }
 
-    def test_single_and_step_modes_validate_only_active_fields(self):
+    def test_single_step_and_custom_modes_validate_only_active_fields(self):
         base = {
             'sample_nplc': 0.05,
             'bias_terminal': 'REAR',
@@ -1199,6 +1206,10 @@ class ItBufferTests(unittest.TestCase):
                 'b_end': 0.1,
                 'b_test_step': 0.01,
             },
+            {
+                'b_mode': 'custom',
+                'b_targets': [0.0, 0.1, -0.1, 0.1],
+            },
         ):
             params = dict(base)
             params.update(mode_values)
@@ -1209,6 +1220,205 @@ class ItBufferTests(unittest.TestCase):
                 self._setup_responses()
             )
             measurement.setup()
+
+    def test_custom_sequence_parser_keeps_order_and_duplicates(self):
+        self.assertEqual(
+            parse_it_voltage_sequence(
+                '0, 0.2；-0.1  0.2\n0', '自定义偏压'
+            ),
+            [0.0, 0.2, -0.1, 0.2, 0.0],
+        )
+        with self.assertRaisesRegex(ValueError, '第2项'):
+            parse_it_voltage_sequence('0, bad, 1', '自定义栅压')
+        with self.assertRaisesRegex(ValueError, '不能为空'):
+            parse_it_voltage_sequence('  ', '自定义偏压')
+
+    def test_three_by_three_voltage_modes_build_expected_targets(self):
+        mode_params = {
+            'single': {
+                'target': 0.2,
+                'expected': [0.2],
+            },
+            'step': {
+                'start': -0.1,
+                'end': 0.1,
+                'test_step': 0.1,
+                'expected': [-0.1, 0.0, 0.1],
+            },
+            'custom': {
+                'targets': [0.2, -0.1, 0.2],
+                'expected': [0.2, -0.1, 0.2],
+            },
+        }
+        for gate_mode, gate_values in mode_params.items():
+            for bias_mode, bias_values in mode_params.items():
+                with self.subTest(gate=gate_mode, bias=bias_mode):
+                    params = {
+                        'g_mode': gate_mode,
+                        'b_mode': bias_mode,
+                    }
+                    for key, value in gate_values.items():
+                        if key != 'expected':
+                            params[f'g_{key}'] = value
+                    for key, value in bias_values.items():
+                        if key != 'expected':
+                            params[f'b_{key}'] = value
+                    self.assertEqual(
+                        build_it_voltage_targets(params, 'g'),
+                        gate_values['expected'],
+                    )
+                    self.assertEqual(
+                        build_it_voltage_targets(params, 'b'),
+                        bias_values['expected'],
+                    )
+
+    def test_custom_step_plan_checks_every_transition_and_zeroing(self):
+        valid = {
+            'gate_enabled': True,
+            'g_mode': 'custom',
+            'g_targets': [0.0, 0.2, -0.1, 0.2],
+            'g_ramp_step': 0.1,
+            'b_mode': 'custom',
+            'b_targets': [0.1, -0.1, 0.1],
+            'b_ramp_step': 0.1,
+        }
+        validate_program_step_plan('it', valid)
+        invalid = dict(valid, b_targets=[0.1, 0.25])
+        with self.assertRaisesRegex(ValueError, '不能整除'):
+            validate_program_step_plan('it', invalid)
+
+    def test_it_page_has_three_modes_for_gate_and_bias(self):
+        app = QApplication.instance() or QApplication([])
+        widget = ItStepWidget()
+        try:
+            self.assertTrue(widget.rb_g_single.isChecked())
+            self.assertTrue(widget.rb_b_single.isChecked())
+            widget.cb_gate.setChecked(True)
+            widget.rb_g_custom.click()
+            widget.rb_b_custom.click()
+            app.processEvents()
+            self.assertFalse(widget.wg_g_custom.isHidden())
+            self.assertTrue(widget.wg_g_single.isHidden())
+            self.assertTrue(widget.wg_g_step.isHidden())
+            self.assertFalse(widget.wg_b_custom.isHidden())
+            self.assertTrue(widget.wg_b_single.isHidden())
+            self.assertTrue(widget.wg_b_step.isHidden())
+            self.assertIn('3 点', widget.lbl_g_custom_summary.text())
+            self.assertIn('3 点', widget.lbl_b_custom_summary.text())
+            self.assertIn('= 9 个It采集块', widget.lbl_combination_summary.text())
+            widget.cb_gate.setChecked(False)
+            self.assertIn(
+                '= 3 个It采集块', widget.lbl_combination_summary.text()
+            )
+        finally:
+            widget.close()
+
+    def test_custom_custom_run_uses_gate_major_cartesian_order(self):
+        with tempfile.TemporaryDirectory() as folder:
+            params = {
+                'gate_enabled': True,
+                'g_mode': 'custom',
+                'g_targets': [0.0, 0.1],
+                'g_ramp_step': 0.1,
+                'g_step_delay': 0.0,
+                'g_settle': 0.0,
+                'g_post_zero_wait': 0.0,
+                'b_mode': 'custom',
+                'b_targets': [0.2, -0.1, 0.2],
+                'b_ramp_step': 0.1,
+                'b_step_delay': 0.0,
+                'b_settle': 0.0,
+                'b_post_wait': 0.0,
+                'meas_mode': 'points',
+                'num_points': 2,
+                'prefix': 'ItCustom',
+                'output_folder': folder,
+            }
+            messages = queue.Queue()
+            measurement = ItMeasurement(
+                params, messages, threading.Event(), threading.Event()
+            )
+            measurement.bias_keithley = FakeInstrument()
+            measurement.gate_keithley = FakeInstrument()
+            result = (
+                np.array([0.0, 0.1]),
+                np.array([1e-6, 2e-6]),
+                np.array([1e-6, 2e-6]),
+                {'aborted': False},
+            )
+            with (
+                patch.object(measurement, 'connect'),
+                patch.object(measurement, 'setup'),
+                patch.object(measurement, '_ramp_voltage', return_value=True),
+                patch.object(
+                    measurement, '_interruptible_sleep', return_value=True
+                ),
+                patch.object(measurement, '_measure_it', return_value=result),
+                patch.object(measurement, 'safe_zeroing'),
+                patch(
+                    'modules.it_step_setgate.reliable_output_off',
+                    return_value=(True, []),
+                ),
+            ):
+                measurement.run()
+            completed = []
+            while not messages.empty():
+                message = messages.get_nowait()
+                if message[0] == 'block_done':
+                    completed.append(message)
+            self.assertEqual(
+                [(message[1], message[2]) for message in completed],
+                [
+                    (0.0, 0.2), (0.0, -0.1), (0.0, 0.2),
+                    (0.1, 0.2), (0.1, -0.1), (0.1, 0.2),
+                ],
+            )
+            self.assertEqual(
+                [message[10]['combination_index'] for message in completed],
+                list(range(1, 7)),
+            )
+            self.assertTrue(all(
+                '_G' in Path(message[7]).name
+                and '_B' in Path(message[7]).name
+                for message in completed
+            ))
+
+    def test_it_save_writes_sequence_metadata(self):
+        class SaveTarget:
+            def post_log(self, _message):
+                pass
+
+        with tempfile.TemporaryDirectory() as folder:
+            reserved = allocate_unique_path(folder, 'custom_it.txt')
+            sequence_metadata = {
+                'gate_mode': 'custom',
+                'bias_mode': 'custom',
+                'gate_sequence_index': 2,
+                'bias_sequence_index': 3,
+                'combination_index': 6,
+                'combination_count': 6,
+            }
+            result = ItStepWidget.save_data(
+                SaveTarget(),
+                0.1,
+                0.2,
+                np.array([0.0, 0.1]),
+                np.array([1e-6, 2e-6]),
+                np.array([1e-6, 2e-6]),
+                {'enabled': False},
+                reserved,
+                sequence_metadata,
+                gate_enabled=True,
+            )
+            self.assertEqual(result['status'], 'complete')
+            path = Path(result['paths'][0])
+            metadata_path = (
+                path.parent / 'metadata' / f'{path.stem}_meta.json'
+            )
+            metadata = json.loads(metadata_path.read_text(encoding='utf-8'))
+            self.assertEqual(metadata['gate_mode'], 'custom')
+            self.assertEqual(metadata['bias_sequence_index'], 3)
+            self.assertEqual(metadata['combination_count'], 6)
 
     def test_fast_buffer_creation_does_not_delete_unknown_buffer(self):
         params = {
@@ -1472,6 +1682,17 @@ class UnifiedTimeSamplingTests(unittest.TestCase):
                 for old_key in ('b_nplc', 'g_nplc', 'b_nplc_s', 'b_nplc_st',
                                 'g_nplc_s', 'g_nplc_st', 'autozero_mode'):
                     self.assertNotIn(old_key, data)
+            it_data = modules['it_step_setgate']
+            self.assertTrue(it_data['custom_gate_text'].strip())
+            self.assertTrue(it_data['custom_bias_text'].strip())
+            self.assertIn('g_ramp_step_c', it_data)
+            self.assertIn('b_ramp_step_c', it_data)
+            self.assertFalse(
+                it_data['__controls__']['rb_g_custom']
+            )
+            self.assertFalse(
+                it_data['__controls__']['rb_b_custom']
+            )
 
     def test_internal_segments_preserve_voltage_assignment(self):
         instrument = FakeInstrument({':SYST:ERR?': '0,"No error"'})
@@ -1531,6 +1752,8 @@ class ConfigurationCompatibilityTests(unittest.TestCase):
             controls = modules['it_step_setgate']['__controls__']
             self.assertTrue(controls['rb_b_single'])
             self.assertFalse(controls['rb_b_step'])
+            self.assertFalse(controls['rb_b_custom'])
+            self.assertFalse(controls['rb_g_custom'])
 
         version, modules = parse_config_modules({
             '__schema_version__': 2,
