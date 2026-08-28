@@ -38,7 +38,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: K2450-Windows-x64
-          path: .build/release/K2450电学测试系统-Windows-x64.zip
+          path: .build/release/K2450-Electrical-Test-System-Windows-x64.zip
           if-no-files-found: error
 
       - name: Publish tagged release
@@ -47,4 +47,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ github.ref_name }}" ".build/release/K2450电学测试系统-Windows-x64.zip" --title "K2450 电学测试系统 ${{ github.ref_name }}" --generate-notes
+          $archive = ".build/release/K2450-Electrical-Test-System-Windows-x64.zip"
+          if (gh release view "${{ github.ref_name }}" 2>$null) {
+            gh release upload "${{ github.ref_name }}" $archive --clobber
+          } else {
+            gh release create "${{ github.ref_name }}" $archive --title "K2450 电学测试系统 ${{ github.ref_name }}" --generate-notes
+          }

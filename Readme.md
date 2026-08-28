@@ -6,7 +6,7 @@
 
 ## 下载与简易使用
 
-普通 Windows 用户请前往 [Releases](https://github.com/lewshannon305/K2450-electrical-test-system/releases/latest) 下载 `K2450电学测试系统-Windows-x64.zip`。完整解压后双击 `K2450电学测试系统.exe` 即可启动，不需要安装 Python，也不需要创建虚拟环境。
+普通 Windows 用户请前往 [Releases](https://github.com/lewshannon305/K2450-electrical-test-system/releases/latest) 下载 `K2450-Electrical-Test-System-Windows-x64.zip`。完整解压后双击 `K2450电学测试系统.exe` 即可启动，不需要安装 Python，也不需要创建虚拟环境。
 
 请保留压缩包中的 `runtime` 和 `configs` 文件夹，并让它们与 EXE 位于同一目录。绿色 **Code → Download ZIP** 下载的是可查看、可编辑的 Python 源码，不包含 Windows 可执行程序。
 
@@ -230,7 +230,7 @@ python -m pip install pyinstaller
 powershell -ExecutionPolicy Bypass -File packaging/build_windows.ps1
 ```
 
-脚本会先运行测试，再在 `.build/release` 中生成 `K2450电学测试系统-Windows-x64.zip`，不会把 EXE 或 `runtime` 写入源码根目录。推送普通提交只更新源码；推送 `v*` 版本标签时，GitHub 会自动构建并发布新的 Release。
+脚本会先运行测试，再在 `.build/release` 中生成 `K2450-Electrical-Test-System-Windows-x64.zip`，不会把 EXE 或 `runtime` 写入源码根目录。推送普通提交只更新源码；推送 `v*` 版本标签时，GitHub 会自动构建并发布新的 Release。
 
 ## 常见问题
 
