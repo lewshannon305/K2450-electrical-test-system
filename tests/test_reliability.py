@@ -552,11 +552,11 @@ class FastZeroingTests(unittest.TestCase):
         worker = ItMeasurement(
             {}, queue.Queue(), threading.Event(), threading.Event()
         )
-        started = time.monotonic()
-        self.assertTrue(worker._ramp_voltage(
-            instrument, 0.001, 0.001, 0.01, is_gate=False
-        ))
-        self.assertGreaterEqual(time.monotonic() - started, 0.0095)
+        with patch('modules.it_step_setgate.time.sleep') as sleep_mock:
+            self.assertTrue(worker._ramp_voltage(
+                instrument, 0.001, 0.001, 0.01, is_gate=False
+            ))
+        sleep_mock.assert_called_once_with(0.01)
 
     def test_dual_meter_final_zeroing_preserves_program_order(self):
         cases = [
