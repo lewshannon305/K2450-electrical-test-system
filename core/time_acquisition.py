@@ -240,24 +240,29 @@ class RealtimeSampler:
 
 
 def create_sampling_settings(owner, inputs, ui_font, bold_font,
-                             gate_available, approximate_sync=False):
+                             gate_available):
     """Build the identical sampling group used by all time-domain pages."""
     from PyQt6.QtWidgets import (
-        QButtonGroup, QGridLayout, QGroupBox, QLabel, QLineEdit, QRadioButton,
+        QButtonGroup, QGridLayout, QGroupBox, QLabel, QLineEdit,
+        QRadioButton, QSizePolicy,
+    )
+    from core.ui_builder import (
+        configure_parameter_grid, style_parameter_control,
+        style_parameter_label,
     )
 
     box = QGroupBox("采样设置")
     box.setFont(bold_font)
     grid = QGridLayout(box)
+    configure_parameter_grid(grid)
 
     def label(text):
         widget = QLabel(text)
-        widget.setFont(ui_font)
-        widget.setStyleSheet("font-weight: normal;")
+        style_parameter_label(widget, ui_font)
         return widget
 
     grid.addWidget(label("采样模式:"), 0, 0)
-    owner.rb_sample_triggered = QRadioButton("高速触发采样")
+    owner.rb_sample_triggered = QRadioButton("高速触发")
     owner.rb_sample_realtime = QRadioButton("实时采样")
     for button in (owner.rb_sample_triggered, owner.rb_sample_realtime):
         button.setFont(ui_font)
@@ -267,38 +272,43 @@ def create_sampling_settings(owner, inputs, ui_font, bold_font,
     owner.sample_mode_group.addButton(owner.rb_sample_triggered)
     owner.sample_mode_group.addButton(owner.rb_sample_realtime)
     grid.addWidget(owner.rb_sample_triggered, 0, 1)
-    grid.addWidget(owner.rb_sample_realtime, 0, 2)
+    grid.addWidget(owner.rb_sample_realtime, 0, 2, 1, 2)
 
     grid.addWidget(label("测量 NPLC:"), 1, 0)
     inputs["sample_nplc"] = QLineEdit("0.05")
-    inputs["sample_nplc"].setFont(ui_font)
+    style_parameter_control(inputs["sample_nplc"], ui_font)
     grid.addWidget(inputs["sample_nplc"], 1, 1)
 
     owner.lbl_sample_help = label("")
+    owner.lbl_sample_help.setMinimumWidth(0)
+    owner.lbl_sample_help.setMaximumWidth(16777215)
+    owner.lbl_sample_help.setSizePolicy(
+        QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+    )
     owner.lbl_sample_help.setStyleSheet("font-weight: normal; color: #555555;")
     grid.addWidget(owner.lbl_sample_help, 1, 2, 1, 2)
 
     owner.lbl_plot_interval = label("界面刷新间隔 (点):")
     inputs["plot_interval"] = QLineEdit("50")
-    inputs["plot_interval"].setFont(ui_font)
+    style_parameter_control(inputs["plot_interval"], ui_font)
     grid.addWidget(owner.lbl_plot_interval, 2, 0)
     grid.addWidget(inputs["plot_interval"], 2, 1)
 
     owner.lbl_gate_monitor_interval = label("栅电流监测间隔 (s):")
     inputs["gate_monitor_interval"] = QLineEdit("1.0")
-    inputs["gate_monitor_interval"].setFont(ui_font)
+    style_parameter_control(inputs["gate_monitor_interval"], ui_font)
     grid.addWidget(owner.lbl_gate_monitor_interval, 2, 2)
     grid.addWidget(inputs["gate_monitor_interval"], 2, 3)
 
     owner.lbl_gate_monitor_note = label("Ig 仅慢速监测，不保存、不绘图")
+    owner.lbl_gate_monitor_note.setMinimumWidth(0)
+    owner.lbl_gate_monitor_note.setMaximumWidth(16777215)
     owner.lbl_gate_monitor_note.setStyleSheet(
         "font-weight: normal; color: #777777;"
     )
     grid.addWidget(owner.lbl_gate_monitor_note, 3, 0, 1, 4)
 
     owner._sampling_gate_available = bool(gate_available)
-    owner._sampling_approximate_sync = bool(approximate_sync)
-
     def refresh():
         realtime = owner.rb_sample_realtime.isChecked()
         inputs["plot_interval"].setEnabled(realtime)
@@ -314,11 +324,7 @@ def create_sampling_settings(owner, inputs, ui_font, bold_font,
             )
         else:
             owner.lbl_sample_help.setText("仪器内部缓冲采集，采集完成后绘图")
-            owner.lbl_gate_monitor_note.setText(
-                "软件近似同步，不保证毫秒级栅压跳变同步；高速模式不监测 Ig"
-                if owner._sampling_approximate_sync else
-                "高速模式不监测 Ig"
-            )
+            owner.lbl_gate_monitor_note.setText("高速模式不监测 Ig")
 
     owner.refresh_sampling_controls = refresh
     owner.set_sampling_gate_available = lambda available: (

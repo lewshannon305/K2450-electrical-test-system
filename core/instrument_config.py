@@ -21,7 +21,7 @@ class InstrumentSettings:
 
     def snapshot(self, require_gate=False):
         if not self.bias_address:
-            raise ValueError('请先在欢迎页选择偏压表')
+            raise ValueError('请先在首页选择偏压表')
         validate_terminal(self.bias_terminal, '偏压端子')
         if require_gate:
             if not self.gate_address:

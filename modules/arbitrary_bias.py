@@ -4,9 +4,8 @@ import numpy as np
 import pyvisa
 
 from PyQt6.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
-    QLineEdit, QPushButton, QGroupBox, QTextEdit, QScrollArea, QFileDialog,
-    QMessageBox, QCheckBox, QSizePolicy, QDialog, QRadioButton, QButtonGroup
+    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
+    QLineEdit, QPushButton, QGroupBox, QTextEdit, QScrollArea, QMessageBox, QCheckBox, QSizePolicy, QDialog, QComboBox,
 )
 from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtGui import QFont
@@ -14,7 +13,7 @@ from PyQt6.QtGui import QFont
 import pyqtgraph as pg
 
 from core.app_base import BaseAppWidget
-from core.paths import default_data_directory
+from core.paths import DataRootSettings
 from core.hardware_base import (
     allocate_unique_path,
     atomic_text_writer,
@@ -36,8 +35,12 @@ from core.hardware_base import (
     write_result_metadata,
 )
 from core.instrument_config import InstrumentSettings
+from core.ui_builder import (
+    bind_range_to_limit, combo_config_value, configure_output_path,
+    configure_parameter_grid, create_current_range_combo, create_status_group,
+    style_parameter_control, style_parameter_label, update_scroll_area_layout,
+)
 from core.time_acquisition import (
-    ACQUISITION_REALTIME,
     ACQUISITION_TRIGGERED,
     GATE_MONITOR_NPLC,
     InternalSegmentCollector,
@@ -46,7 +49,7 @@ from core.time_acquisition import (
     selected_acquisition_mode,
     timing_metadata,
 )
-from core.utils import NoScrollComboBox, _0, _1, _2, _3, _4, _5, _6, _7, configure_pyqtgraph
+from core.utils import _0, _1, _2, _3, _4, _5, _6, _7, configure_pyqtgraph
 
 
 class WaveformEditorDialog(QDialog):
@@ -675,7 +678,7 @@ class ArbMeasurement:
 
 
 class ArbitraryBiasWidget(BaseAppWidget):
-    def __init__(self, run_guard=None, instrument_settings=None, parent=None):
+    def __init__(self, run_guard=None, instrument_settings=None, data_settings=None, parent=None):
         configure_pyqtgraph(use_opengl=False)
         super().__init__(run_guard=run_guard, parent=parent)
 
@@ -685,6 +688,7 @@ class ArbitraryBiasWidget(BaseAppWidget):
             bias_address='GPIB0::1::INSTR',
             gate_address='GPIB0::2::INSTR',
         )
+        self.data_settings = data_settings or DataRootSettings(parent=self)
 
         self.ui_font = QFont("Arial", 12)
         self.ui_font.setWeight(QFont.Weight.Normal)
@@ -742,43 +746,30 @@ class ArbitraryBiasWidget(BaseAppWidget):
         right_layout = QVBoxLayout()
         main_layout.addLayout(right_layout, stretch=2)
 
-        status_group = QGroupBox("实时状态显示")
-        status_group.setFont(self.bold_font)
-        status_group.setFixedHeight(135)
-        status_layout = QGridLayout(status_group)
-        status_layout.setColumnStretch(1, 1)
-        status_layout.setColumnStretch(3, 1)
-        status_layout.setHorizontalSpacing(10)
-
-        self.status_labels = {}
         status_items = [
             ("偏压 Vsd (V):", "bias_v", 0, 0), ("用时 (s):", "time", 0, 2),
             ("栅压 Vg (V):", "gate_v", 1, 0), ("已采点数:", "count", 1, 2),
             ("偏置电流 Isd (A):", "bias_i", 2, 0), ("采样率 (Hz):", "rate", 2, 2),
             ("栅电流 Ig (A):", "gate_i", 3, 0), ("系统状态:", "stage", 3, 2)
         ]
-        for text, key, row, col in status_items:
-            lbl = QLabel(text)
-            lbl.setFont(self.ui_font)
-            lbl.setStyleSheet("font-weight: normal;")
-            status_layout.addWidget(
-                lbl, row, col, alignment=Qt.AlignmentFlag.AlignLeft)
-            val = QLabel("-")
-            val.setFont(self.bold_font)
-            val.setStyleSheet("color: #0055A4;")
-            status_layout.addWidget(
-                val, row, col+1, alignment=Qt.AlignmentFlag.AlignLeft)
-            self.status_labels[key] = val
+        status_group, self.status_labels = create_status_group(
+            status_items, self.ui_font, self.bold_font
+        )
 
         right_layout.addWidget(status_group)
 
         param_group = QGroupBox("测量参数")
         param_group.setFont(self.bold_font)
+        self.parameter_panel = param_group
         param_layout = QVBoxLayout(param_group)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOn
+        )
+        self.parameter_scroll = scroll
         scroll_content = QWidget()
         scroll_content.setFont(self.ui_font)
         box_vbox = QVBoxLayout(scroll_content)
@@ -795,6 +786,7 @@ class ArbitraryBiasWidget(BaseAppWidget):
         meas_box = QGroupBox("偏压波形配置")
         meas_box.setFont(self.bold_font)
         meas_grid = QGridLayout(meas_box)
+        configure_parameter_grid(meas_grid)
 
         btn_edit_wave = QPushButton("打开自定义偏压波形编辑器")
         btn_edit_wave.setFont(self.bold_font)
@@ -812,19 +804,22 @@ class ArbitraryBiasWidget(BaseAppWidget):
 
         def add_p(r, c, txt, k, v):
             lb = QLabel(txt)
-            lb.setFont(self.ui_font)
-            lb.setStyleSheet("font-weight: normal;")
-            le = QLineEdit(v)
-            le.setFont(self.ui_font)
+            style_parameter_label(lb, self.ui_font)
+            le = (
+                create_current_range_combo(v, True, self.ui_font)
+                if k == 'b_range' else QLineEdit(v)
+            )
+            style_parameter_control(le, self.ui_font)
             meas_grid.addWidget(lb, r, c)
             meas_grid.addWidget(le, r, c+1)
             self.inputs[k] = le
 
         add_p(2, 0, "循环次数:", "cycles", "1")
-        add_p(2, 2, "跃变缓冲时延 (s):", "switch_settle", "0.0")
-        add_p(3, 0, "偏压爬坡步长 (V) (正):", "b_ramp_step", "0.001")
-        add_p(3, 2, "偏压电流量程 (A / AUTO):", "b_range", "AUTO")
-        add_p(4, 0, "偏压限流 (A):", "b_ilimit", "0.1")
+        add_p(3, 0, "跃变缓冲时延 (s):", "switch_settle", "0.0")
+        add_p(4, 0, "爬坡/归零步长 (V):", "b_ramp_step", "0.001")
+        add_p(2, 2, "电流量程 (A):", "b_range", "1e-6")
+        add_p(3, 2, "电流限制 (A):", "b_ilimit", "0.1")
+        bind_range_to_limit(self.inputs['b_range'], self.inputs['b_ilimit'])
 
         box_vbox.addWidget(meas_box)
 
@@ -837,22 +832,22 @@ class ArbitraryBiasWidget(BaseAppWidget):
         self.gate_box = QGroupBox("栅压参数")
         self.gate_box.setFont(self.bold_font)
         gate_grid = QGridLayout(self.gate_box)
+        configure_parameter_grid(gate_grid)
 
         def add_gp(r, c, txt, k, v):
             lb = QLabel(txt)
-            lb.setFont(self.ui_font)
-            lb.setStyleSheet("font-weight: normal;")
+            style_parameter_label(lb, self.ui_font)
             le = QLineEdit(v)
-            le.setFont(self.ui_font)
+            style_parameter_control(le, self.ui_font)
             gate_grid.addWidget(lb, r, c)
             gate_grid.addWidget(le, r, c+1)
             self.inputs[k] = le
 
-        add_gp(0, 0, "栅压目标值 (V):", "g_target", "0.0")
-        add_gp(0, 2, "栅压爬坡步长 (V) (正):", "g_ramp_step", "0.1")
-        add_gp(1, 0, "栅压单步时延 (s):", "g_step_delay", "0.5")
-        add_gp(1, 2, "栅压到位等待 (s):", "g_settle", "20.0")
-        add_gp(2, 0, "栅压限流 (A):", "g_ilimit", "1e-9")
+        add_gp(0, 0, "目标电压 (V):", "g_target", "0.0")
+        add_gp(1, 0, "爬坡/归零步长 (V):", "g_ramp_step", "0.1")
+        add_gp(2, 0, "栅压单步延时 (s):", "g_step_delay", "0.5")
+        add_gp(0, 2, "栅压到位等待 (s):", "g_settle", "20.0")
+        add_gp(1, 2, "电流限制 (A):", "g_ilimit", "1e-9")
 
         box_vbox.addWidget(self.gate_box)
         self.gate_box.setVisible(False)
@@ -860,27 +855,15 @@ class ArbitraryBiasWidget(BaseAppWidget):
         path_box = QGroupBox("文件保存路径")
         path_box.setFont(self.bold_font)
         path_grid = QGridLayout(path_box)
-        lbl_ff = QLabel("完整文件名:")
-        lbl_ff.setFont(self.ui_font)
-        lbl_ff.setStyleSheet("font-weight: normal;")
-        path_grid.addWidget(lbl_ff, 0, 0)
         self.inputs['filename'] = QLineEdit("arb_test.txt")
         self.inputs['filename'].setFont(self.ui_font)
-        path_grid.addWidget(self.inputs['filename'], 0, 1)
-
-        lbl_fd = QLabel("保存文件夹:")
-        lbl_fd.setFont(self.ui_font)
-        lbl_fd.setStyleSheet("font-weight: normal;")
-        path_grid.addWidget(lbl_fd, 1, 0, 1, 2)
-        fhbox = QHBoxLayout()
-        self.ent_folder = QLineEdit(default_data_directory("Arbitrary_Bias"))
+        self.ent_folder = QLineEdit('Arbitrary_Bias')
         self.ent_folder.setFont(self.ui_font)
-        fhbox.addWidget(self.ent_folder)
-        btn_br = QPushButton("浏览")
-        btn_br.setFont(self.ui_font)
-        btn_br.clicked.connect(self.browse_folder)
-        fhbox.addWidget(btn_br)
-        path_grid.addLayout(fhbox, 2, 0, 1, 2)
+        configure_output_path(
+            self, path_grid, self.ent_folder, self.inputs['filename'],
+            self.data_settings, 'Arbitrary_Bias',
+            hint='',
+        )
         box_vbox.addWidget(path_box)
 
         box_vbox.addStretch()
@@ -937,8 +920,14 @@ class ArbitraryBiasWidget(BaseAppWidget):
         right_layout.addWidget(btn_area)
 
     def toggle_gate(self):
-        self.gate_box.setVisible(self.cb_gate.isChecked())
-        self.set_sampling_gate_available(self.cb_gate.isChecked())
+        def update_widgets():
+            enabled = self.cb_gate.isChecked()
+            self.gate_box.setVisible(enabled)
+            self.set_sampling_gate_available(enabled)
+
+        update_scroll_area_layout(
+            self.parameter_scroll, update_widgets, self.parameter_panel
+        )
 
     def open_waveform_editor(self):
         try:
@@ -950,11 +939,6 @@ class ArbitraryBiasWidget(BaseAppWidget):
         if editor.exec() == QDialog.DialogCode.Accepted and editor.changed:
             self.waveform = editor.waveform
             self.lbl_wave_info.setText(f"当前偏压波形段数: {len(self.waveform)}")
-
-    def browse_folder(self):
-        d = QFileDialog.getExistingDirectory(self, "选择保存文件夹")
-        if d:
-            self.ent_folder.setText(d)
 
     def log_info(self, msg):
         self.log_text.append(msg)
@@ -981,8 +965,8 @@ class ArbitraryBiasWidget(BaseAppWidget):
         p = {}
         try:
             for k, widget in self.inputs.items():
-                if isinstance(widget, NoScrollComboBox):
-                    p[k] = widget.currentText().strip()
+                if isinstance(widget, QComboBox):
+                    p[k] = combo_config_value(widget)
                 elif isinstance(widget, QLineEdit):
                     p[k] = widget.text().strip()
 
@@ -1048,7 +1032,7 @@ class ArbitraryBiasWidget(BaseAppWidget):
                     raise ValueError('波形每段时长必须大于 0')
             validate_program_step_plan('arbitrary_bias', preset)
 
-            folder = self.ent_folder.text().strip()
+            folder = self.resolved_output_folder()
             self.current_folder = folder
             os.makedirs(folder, exist_ok=True)
             with open(os.path.join(folder, '.test'), 'w') as f:

@@ -5,7 +5,6 @@ import numpy as np
 import pyvisa
 
 from PyQt6.QtWidgets import (
-    QApplication,
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
@@ -16,9 +15,9 @@ from PyQt6.QtWidgets import (
     QGroupBox,
     QTextEdit,
     QScrollArea,
-    QFileDialog,
     QMessageBox,
     QSizePolicy,
+    QComboBox,
 )
 from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtGui import QFont
@@ -26,7 +25,7 @@ from PyQt6.QtGui import QFont
 import pyqtgraph as pg
 
 from core.app_base import BaseAppWidget
-from core.paths import default_data_directory
+from core.paths import DataRootSettings
 from core.hardware_base import (
     allocate_unique_path,
     atomic_text_writer,
@@ -49,7 +48,12 @@ from core.hardware_base import (
     write_result_metadata,
 )
 from core.instrument_config import InstrumentSettings
-from core.utils import NoScrollComboBox, G0, _0, _1, configure_pyqtgraph
+from core.ui_builder import (
+    bind_range_to_limit, combo_config_value, configure_output_path,
+    configure_parameter_grid, create_current_range_combo, create_status_group,
+    style_parameter_control, style_parameter_label,
+)
+from core.utils import G0, _0, _1, configure_pyqtgraph
 
 class MappingMeasurement:
     GATE_RAMP_DELAY = 0.5
@@ -91,7 +95,7 @@ class MappingMeasurement:
 
     def _generate_ramp(self, start, stop, step):
         if step <= 0:
-            raise ValueError(f"步长必须为正值")
+            raise ValueError("步长必须为正值")
         if start <= stop:
             return np.arange(start, stop + step / 2, step)
         return np.arange(start, stop - step / 2, -step)
@@ -643,7 +647,7 @@ class MappingMeasurement:
 
 
 class MappingWidget(BaseAppWidget):
-    def __init__(self, run_guard=None, instrument_settings=None, parent=None):
+    def __init__(self, run_guard=None, instrument_settings=None, data_settings=None, parent=None):
         configure_pyqtgraph(use_opengl=True)
         super().__init__(run_guard=run_guard, parent=parent)
 
@@ -653,6 +657,7 @@ class MappingWidget(BaseAppWidget):
             bias_address='GPIB0::1::INSTR',
             gate_address='GPIB0::2::INSTR',
         )
+        self.data_settings = data_settings or DataRootSettings(parent=self)
 
         self.ui_font = QFont('Arial', 12)
         self.ui_font.setWeight(QFont.Weight.Normal)
@@ -710,33 +715,15 @@ class MappingWidget(BaseAppWidget):
         right_layout = QVBoxLayout()
         main_layout.addLayout(right_layout, stretch=2)
 
-        status_group = QGroupBox('实时状态显示')
-        status_group.setFont(self.bold_font)
-        status_group.setFixedHeight(135)
-        status_layout = QGridLayout(status_group)
-        status_layout.setColumnStretch(1, 1)
-        status_layout.setColumnStretch(3, 1)
-        status_layout.setHorizontalSpacing(10)
-
-        self.status_labels = {}
         status_items = [
             ('偏压 Vsd (V):', 'vb', 0, 0), ('电导 (G₀):', 'cond', 0, 2),
             ('栅压 Vg (V):', 'vg', 1, 0), ('电阻 (Ω):', 'res', 1, 2),
             ('偏置电流 Isd (A):', 'ib', 2, 0), ('进度:', 'progress', 2, 2),
             ('栅电流 Ig (A):', 'ig', 3, 0), ('系统状态:', 'stage', 3, 2),
         ]
-        for text, key, row, col in status_items:
-            lbl = QLabel(text)
-            lbl.setFont(self.ui_font)
-            status_layout.addWidget(
-                lbl, row, col, alignment=Qt.AlignmentFlag.AlignLeft)
-
-            val = QLabel('-')
-            val.setFont(self.ui_font)
-            val.setStyleSheet('color: #0055A4; font-weight: bold;')
-            status_layout.addWidget(
-                val, row, col + 1, alignment=Qt.AlignmentFlag.AlignLeft)
-            self.status_labels[key] = val
+        status_group, self.status_labels = create_status_group(
+            status_items, self.ui_font, self.bold_font
+        )
         right_layout.addWidget(status_group)
 
         param_group = QGroupBox('测量参数')
@@ -755,20 +742,21 @@ class MappingWidget(BaseAppWidget):
         gate_box = QGroupBox('栅压参数')
         gate_box.setFont(self.bold_font)
         gate_grid = QGridLayout(gate_box)
+        configure_parameter_grid(gate_grid)
         gate_items = [
-            ('起始栅压 (V):', 'vg_start', '-5.0'), ('终止栅压 (V):', 'vg_stop', '5.0'),
-            ('栅压步长 (V) (正):', 'vg_step', '0.05'), ('栅压量程 (V):', 'gate_v_range', '20'),
-            ('栅极限流 (A):', 'gate_i_limit',
-             '1e-9'), ('栅极报警阈值 (A):', 'ig_threshold', '1e-9'),
+            ('起始电压 (V):', 'vg_start', '-5.0'), ('终止电压 (V):', 'vg_stop', '5.0'),
+            ('扫描步长 (V):', 'vg_step', '0.05'), ('电压量程 (V):', 'gate_v_range', '20'),
+            ('电流限制 (A):', 'gate_i_limit',
+             '1e-9'), ('电流保护阈值 (A):', 'ig_threshold', '1e-9'),
         ]
         for i, (label, key, def_val) in enumerate(gate_items):
             r = i % 3
             c = (i // 3) * 2
             lbl = QLabel(label)
-            lbl.setFont(self.ui_font)
+            style_parameter_label(lbl, self.ui_font)
             gate_grid.addWidget(lbl, r, c)
             ent = QLineEdit(def_val)
-            ent.setFont(self.ui_font)
+            style_parameter_control(ent, self.ui_font)
             self.inputs[key] = ent
             gate_grid.addWidget(ent, r, c + 1)
         box_vbox.addWidget(gate_box)
@@ -776,28 +764,36 @@ class MappingWidget(BaseAppWidget):
         bias_box = QGroupBox('偏压参数')
         bias_box.setFont(self.bold_font)
         bias_grid = QGridLayout(bias_box)
+        configure_parameter_grid(bias_grid)
         bias_items = [
             ('偏压最大值 (V):', 'bias_max', '0.02'), ('偏压最小值 (V):', 'bias_min', '-0.02'),
-            ('全程步长 (V) (正):', 'bias_step_full',
-             '0.0001'), ('上升步长 (V) (正):', 'bias_step_up', '0.001'),
-            ('偏压 NPLC:', 'bias_nplc', '1'), ('电流量程 (A / AUTO):', 'bias_range', '1e-6'),
-            ('偏压限流 (A):', 'bias_i_limit', '1.05e-6'),
+            ('全程步长 (V):', 'bias_step_full',
+             '0.0001'), ('上升步长 (V):', 'bias_step_up', '0.001'),
+            ('测量 NPLC:', 'bias_nplc', '1'), ('电流量程 (A):', 'bias_range', '1e-6'),
+            ('电流限制 (A):', 'bias_i_limit', '1.05e-6'),
         ]
         for i, (label, key, def_val) in enumerate(bias_items):
             r = i % 4
             c = (i // 4) * 2
             lbl = QLabel(label)
-            lbl.setFont(self.ui_font)
+            style_parameter_label(lbl, self.ui_font)
             bias_grid.addWidget(lbl, r, c)
-            ent = QLineEdit(def_val)
-            ent.setFont(self.ui_font)
+            ent = (
+                create_current_range_combo(def_val, True, self.ui_font)
+                if key == 'bias_range' else QLineEdit(def_val)
+            )
+            style_parameter_control(ent, self.ui_font)
             self.inputs[key] = ent
             bias_grid.addWidget(ent, r, c + 1)
+        bind_range_to_limit(
+            self.inputs['bias_range'], self.inputs['bias_i_limit']
+        )
         box_vbox.addWidget(bias_box)
 
         time_box = QGroupBox('时间设定')
         time_box.setFont(self.bold_font)
         time_grid = QGridLayout(time_box)
+        configure_parameter_grid(time_grid)
         time_items = [
             ('初始等待 (s):', 'wait_init', '600'), ('上升后等待 (s):', 'wait_after_up', '5'),
             ('栅压等待 (s):', 'gate_settle', '20'), ('偏压等待 (s):', 'bias_settle', '0'),
@@ -806,10 +802,10 @@ class MappingWidget(BaseAppWidget):
             r = i % 2
             c = (i // 2) * 2
             lbl = QLabel(label)
-            lbl.setFont(self.ui_font)
+            style_parameter_label(lbl, self.ui_font)
             time_grid.addWidget(lbl, r, c)
             ent = QLineEdit(def_val)
-            ent.setFont(self.ui_font)
+            style_parameter_control(ent, self.ui_font)
             self.inputs[key] = ent
             time_grid.addWidget(ent, r, c + 1)
         box_vbox.addWidget(time_box)
@@ -818,27 +814,16 @@ class MappingWidget(BaseAppWidget):
         path_box.setFont(self.bold_font)
         path_grid = QGridLayout(path_box)
 
-        lbl_pf = QLabel('文件名前缀 (后缀自动追加栅压、偏压信息):')
-        lbl_pf.setFont(self.ui_font)
-        path_grid.addWidget(lbl_pf, 0, 0, 1, 2)
         self.ent_prefix = QLineEdit('Mapping')
         self.ent_prefix.setFont(self.ui_font)
         self.inputs['prefix'] = self.ent_prefix
-        path_grid.addWidget(self.ent_prefix, 1, 0, 1, 2)
-
-        lbl_fd = QLabel('保存文件夹:')
-        lbl_fd.setFont(self.ui_font)
-        path_grid.addWidget(lbl_fd, 2, 0, 1, 2)
-        fhbox = QHBoxLayout()
-        fhbox.setContentsMargins(0, 0, 0, 0)
-        self.ent_folder = QLineEdit(default_data_directory("Mapping"))
+        self.ent_folder = QLineEdit('Mapping')
         self.ent_folder.setFont(self.ui_font)
-        fhbox.addWidget(self.ent_folder)
-        btn_br = QPushButton('浏览')
-        btn_br.setFont(self.ui_font)
-        btn_br.clicked.connect(self.browse_folder)
-        fhbox.addWidget(btn_br)
-        path_grid.addLayout(fhbox, 3, 0, 1, 2)
+        configure_output_path(
+            self, path_grid, self.ent_folder, self.ent_prefix,
+            self.data_settings, 'Mapping', filename_is_prefix=True,
+            hint='后缀自动追加：栅压、偏压信息',
+        )
         box_vbox.addWidget(path_box)
         box_vbox.addStretch()
 
@@ -894,11 +879,6 @@ class MappingWidget(BaseAppWidget):
         btn_hbox.addWidget(self.btn_force)
         right_layout.addWidget(btn_area)
 
-    def browse_folder(self):
-        directory = QFileDialog.getExistingDirectory(self, '选择保存文件夹')
-        if directory:
-            self.ent_folder.setText(directory)
-
     def log_info(self, msg):
         self.log_text.append(msg)
         self.log_text.verticalScrollBar().setValue(
@@ -925,8 +905,8 @@ class MappingWidget(BaseAppWidget):
                 'gate_term': instrument['gate_terminal'],
             })
             for key, widget in self.inputs.items():
-                if isinstance(widget, NoScrollComboBox):
-                    preset[key] = widget.currentText().strip()
+                if isinstance(widget, QComboBox):
+                    preset[key] = combo_config_value(widget)
                 elif isinstance(widget, QLineEdit):
                     txt = widget.text().strip()
                     if key in ['prefix']:
@@ -935,8 +915,9 @@ class MappingWidget(BaseAppWidget):
                         preset[key] = txt if txt.upper(
                         ) == 'AUTO' else float(txt)
 
-            preset['pos_dir'] = os.path.join(self.ent_folder.text(), 'pos')
-            preset['full_dir'] = os.path.join(self.ent_folder.text(), 'full')
+            output_folder = self.resolved_output_folder()
+            preset['pos_dir'] = os.path.join(output_folder, 'pos')
+            preset['full_dir'] = os.path.join(output_folder, 'full')
             if preset['vg_step'] <= 0:
                 raise ValueError('栅压步长必须大于 0')
             if preset['gate_v_range'] <= 0:

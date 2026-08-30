@@ -19,7 +19,6 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QFontComboBox,
-    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -169,6 +168,10 @@ def default_plot_settings():
                 'it_show_mean': True,
                 'it_show_median': True,
                 'it_show_std': True,
+                'it_line_filter_mode': 'off',
+                'it_line_frequency': 50.0,
+                'it_line_search_hz': 0.5,
+                'it_max_odd_harmonic': 5,
             }
             for module_id in MODULE_NAMES
         },
@@ -179,10 +182,6 @@ def merge_plot_settings(value):
     settings = default_plot_settings()
     if not isinstance(value, dict):
         return settings
-    try:
-        incoming_version = int(value.get('plot_schema_version', 1))
-    except (TypeError, ValueError):
-        incoming_version = 1
     for key in (
         'auto_plot', 'plot_partial', 'show_preview', 'format', 'dpi',
         'width', 'height', 'grid', 'output_mode', 'output_folder',
@@ -197,16 +196,6 @@ def merge_plot_settings(value):
         for module_id, module_value in modules.items():
             if module_id in settings['modules'] and isinstance(module_value, dict):
                 settings['modules'][module_id].update(module_value)
-    if incoming_version < 2:
-        for module in settings['modules'].values():
-            if float(module.get('line_width', 0)) == 0.8:
-                module['line_width'] = 1.0
-            if int(module.get('tick_size', 0)) == 6:
-                module['tick_size'] = 7
-            if float(module.get('tick_length', 0)) == 3.0:
-                module['tick_length'] = 4.0
-            if float(module.get('tick_width', 0)) == 0.6:
-                module['tick_width'] = 0.8
     settings['plot_schema_version'] = 2
     return settings
 
@@ -587,6 +576,22 @@ class PlotSettingsDialog(QDialog):
                 page_form.addRow('平滑窗口（奇数）：', self.spin_savgol_window)
                 page_form.addRow('平滑阶数：', self.spin_savgol_order)
             elif module_id == 'it_step_setgate':
+                self.combo_it_line_filter = QComboBox()
+                self.combo_it_line_filter.addItem('关闭', 'off')
+                self.combo_it_line_filter.addItem('谐波拟合扣除', 'harmonic_fit')
+                self.spin_it_line_frequency = QDoubleSpinBox()
+                self.spin_it_line_frequency.setRange(0.1, 1000.0)
+                self.spin_it_line_frequency.setDecimals(3)
+                self.spin_it_line_search = QDoubleSpinBox()
+                self.spin_it_line_search.setRange(0.0, 100.0)
+                self.spin_it_line_search.setDecimals(3)
+                self.spin_it_max_harmonic = QSpinBox()
+                self.spin_it_max_harmonic.setRange(1, 99)
+                self.spin_it_max_harmonic.setSingleStep(2)
+                page_form.addRow('工频处理：', self.combo_it_line_filter)
+                page_form.addRow('工频中心 (Hz)：', self.spin_it_line_frequency)
+                page_form.addRow('频率搜索 ±Hz：', self.spin_it_line_search)
+                page_form.addRow('最高奇次谐波：', self.spin_it_max_harmonic)
                 self.combo_it_bin_method = QComboBox()
                 for label, value in (
                     ('Freedman–Diaconis', 'fd'), ('Scott', 'scott'),
@@ -685,7 +690,9 @@ class PlotSettingsDialog(QDialog):
             'spin_savgol_window', 'spin_savgol_order',
             'combo_it_bin_method', 'spin_it_bins', 'spin_it_bin_width',
             'combo_it_hist_norm', 'cb_it_mean', 'cb_it_median',
-            'cb_it_std',
+            'cb_it_std', 'combo_it_line_filter',
+            'spin_it_line_frequency', 'spin_it_line_search',
+            'spin_it_max_harmonic',
         ):
             if hasattr(self, name):
                 widgets.append(getattr(self, name))
@@ -764,6 +771,10 @@ class PlotSettingsDialog(QDialog):
                 'it_show_mean': self.cb_it_mean.isChecked(),
                 'it_show_median': self.cb_it_median.isChecked(),
                 'it_show_std': self.cb_it_std.isChecked(),
+                'it_line_filter_mode': self.combo_it_line_filter.currentData(),
+                'it_line_frequency': self.spin_it_line_frequency.value(),
+                'it_line_search_hz': self.spin_it_line_search.value(),
+                'it_max_odd_harmonic': self.spin_it_max_harmonic.value(),
             })
 
     def _load_module(self, module_id):
@@ -853,6 +864,20 @@ class PlotSettingsDialog(QDialog):
             )
             self.spin_savgol_order.setValue(int(value.get('savgol_order', 2)))
         elif module_id == 'it_step_setgate':
+            self.combo_it_line_filter.setCurrentIndex(max(
+                0, self.combo_it_line_filter.findData(
+                    value.get('it_line_filter_mode', 'off')
+                )
+            ))
+            self.spin_it_line_frequency.setValue(float(
+                value.get('it_line_frequency', 50.0)
+            ))
+            self.spin_it_line_search.setValue(float(
+                value.get('it_line_search_hz', 0.5)
+            ))
+            self.spin_it_max_harmonic.setValue(int(
+                value.get('it_max_odd_harmonic', 5)
+            ))
             self.combo_it_bin_method.setCurrentIndex(max(
                 0, self.combo_it_bin_method.findData(
                     value.get('it_bin_method', 'fd')
@@ -1407,6 +1432,14 @@ class PlotSettingsDialog(QDialog):
                 order = int(module.get('savgol_order', 2))
                 if window % 2 == 0 or window <= order:
                     raise ValueError('二维 Mapping：平滑窗口必须为奇数且大于阶数')
+            if module_id == 'it_step_setgate':
+                if float(module.get('it_line_frequency', 50.0)) <= 0:
+                    raise ValueError('It：工频中心必须大于 0')
+                if float(module.get('it_line_search_hz', 0.5)) < 0:
+                    raise ValueError('It：频率搜索宽度不能为负数')
+                harmonic = int(module.get('it_max_odd_harmonic', 5))
+                if harmonic <= 0 or harmonic % 2 == 0:
+                    raise ValueError('It：最高谐波必须为正奇数')
         return value
 
     def _apply_without_close(self):

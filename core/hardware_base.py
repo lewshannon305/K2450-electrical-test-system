@@ -760,9 +760,6 @@ def allocate_unique_path(folder, filename):
             candidate.exists()
             or reservation.exists()
             or result_metadata_path(candidate).exists()
-            # Retain collision protection for metadata written by older
-            # versions next to the data file.
-            or candidate.with_name(candidate.stem + '_meta.json').exists()
             or candidate.with_name(
                 candidate.stem + '_partial' + candidate.suffix
             ).exists()

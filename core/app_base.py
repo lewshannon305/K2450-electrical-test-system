@@ -1,7 +1,6 @@
 from PyQt6.QtWidgets import QWidget, QMessageBox
 from PyQt6.QtCore import QTimer, pyqtSignal
 from concurrent.futures import ThreadPoolExecutor
-import os
 import queue
 import threading
 import time
@@ -200,13 +199,9 @@ class BaseAppWidget(QWidget):
                 errors.append(record['error'])
         metadata_files = []
         for path in data_files:
-            base, _ = os.path.splitext(path)
             current_metadata = result_metadata_path(path)
-            legacy_metadata = f'{base}_meta.json'
             if current_metadata.exists():
                 metadata_files.append(str(current_metadata))
-            elif os.path.exists(legacy_metadata):
-                metadata_files.append(legacy_metadata)
         self.result_ready.emit({
             'run_id': run_id,
             'module_id': module_id,

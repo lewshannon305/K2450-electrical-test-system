@@ -1,11 +1,9 @@
 import os
-import threading
 import time
 import numpy as np
 import pyvisa
 
 from PyQt6.QtWidgets import (
-    QApplication,
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
@@ -16,7 +14,6 @@ from PyQt6.QtWidgets import (
     QGroupBox,
     QTextEdit,
     QScrollArea,
-    QFileDialog,
     QMessageBox,
     QComboBox,
     QSizePolicy,
@@ -27,7 +24,7 @@ from PyQt6.QtGui import QFont
 import pyqtgraph as pg
 
 from core.app_base import BaseAppWidget
-from core.paths import default_data_directory
+from core.paths import DataRootSettings
 from core.hardware_base import (
     allocate_unique_path,
     atomic_text_writer,
@@ -50,6 +47,11 @@ from core.hardware_base import (
     write_result_metadata,
 )
 from core.instrument_config import InstrumentSettings
+from core.ui_builder import (
+    bind_range_to_limit, combo_config_value, configure_output_path,
+    configure_parameter_grid, create_current_range_combo, create_status_group,
+    style_parameter_control, style_parameter_label,
+)
 from core.utils import configure_pyqtgraph, G0
 
 
@@ -488,7 +490,7 @@ class IsdVgMeasurement:
 
 
 class IsdVgSetVsdWidget(BaseAppWidget):
-    def __init__(self, run_guard=None, instrument_settings=None, parent=None):
+    def __init__(self, run_guard=None, instrument_settings=None, data_settings=None, parent=None):
         configure_pyqtgraph(use_opengl=False)
         super().__init__(run_guard=run_guard, parent=parent)
 
@@ -498,6 +500,7 @@ class IsdVgSetVsdWidget(BaseAppWidget):
             bias_address='GPIB0::1::INSTR',
             gate_address='GPIB0::2::INSTR',
         )
+        self.data_settings = data_settings or DataRootSettings(parent=self)
 
         self.ui_font = QFont('Arial', 12)
         self.ui_font.setWeight(QFont.Weight.Normal)
@@ -560,32 +563,15 @@ class IsdVgSetVsdWidget(BaseAppWidget):
         right_layout = QVBoxLayout()
         main_layout.addLayout(right_layout, stretch=2)
 
-        status_group = QGroupBox('实时状态显示')
-        status_group.setFont(self.bold_font)
-        status_group.setFixedHeight(135)
-        status_layout = QGridLayout(status_group)
-        status_layout.setColumnStretch(1, 1)
-        status_layout.setColumnStretch(3, 1)
-        status_layout.setHorizontalSpacing(10)
-
-        self.status_labels = {}
         status_items = [
             ('偏压 Vsd (V):', 'vsd', 0, 0), ('电导 (G₀):', 'cond', 0, 2),
             ('栅压 Vg (V):', 'vg', 1, 0), ('电阻 (Ω):', 'res', 1, 2),
-            ('偏置电流 Isd (A):', 'isd', 2, 0), ('系统状态:', 'stage', 2, 2),
-            ('栅电流 Ig (A):', 'ig', 3, 0),
+            ('偏置电流 Isd (A):', 'isd', 2, 0), ('进度:', 'progress', 2, 2),
+            ('栅电流 Ig (A):', 'ig', 3, 0), ('系统状态:', 'stage', 3, 2),
         ]
-        for text, key, row, col in status_items:
-            lbl = QLabel(text)
-            lbl.setFont(self.ui_font)
-            status_layout.addWidget(
-                lbl, row, col, alignment=Qt.AlignmentFlag.AlignLeft)
-            val = QLabel('-')
-            val.setFont(self.bold_font)
-            val.setStyleSheet('color: #0055A4;')
-            status_layout.addWidget(
-                val, row, col + 1, alignment=Qt.AlignmentFlag.AlignLeft)
-            self.status_labels[key] = val
+        status_group, self.status_labels = create_status_group(
+            status_items, self.ui_font, self.bold_font
+        )
 
         right_layout.addWidget(status_group)
 
@@ -606,79 +592,72 @@ class IsdVgSetVsdWidget(BaseAppWidget):
         bias_box = QGroupBox('偏压参数')
         bias_box.setFont(self.bold_font)
         bias_grid = QGridLayout(bias_box)
+        configure_parameter_grid(bias_grid)
         bias_items = [
-            ('目标偏压 (V):', 'Bias_target', '0.002'),
-            ('偏压步长 (V) (正):', 'Bias_step', '0.001'),
-            ('偏压限流 (A):', 'Bias_I_LIMIT', '1.05e-7'),
-            ('偏压 NPLC:', 'Bias_NPLC', '10.0'),
+            ('目标电压 (V):', 'Bias_target', '0.002'),
+            ('扫描步长 (V):', 'Bias_step', '0.001'),
+            ('电流限制 (A):', 'Bias_I_LIMIT', '1.05e-7'),
+            ('测量 NPLC:', 'Bias_NPLC', '10.0'),
             ('电流量程 (A):', 'Bias_RANGE', '1e-7'),
-            ('偏压后延时 (s):', 'Bias_Delay', '3.0'),
+            ('偏压到位等待 (s):', 'Bias_Delay', '3.0'),
         ]
         for i, (label, key, default) in enumerate(bias_items):
             row = i % 3
             col = (i // 3) * 2
             lbl = QLabel(label)
-            lbl.setFont(self.ui_font)
+            style_parameter_label(lbl, self.ui_font)
             bias_grid.addWidget(lbl, row, col)
-            ent = QLineEdit(default)
-            ent.setFont(self.ui_font)
+            ent = (
+                create_current_range_combo(default, True, self.ui_font)
+                if key == 'Bias_RANGE' else QLineEdit(default)
+            )
+            style_parameter_control(ent, self.ui_font)
             self.inputs[key] = ent
             bias_grid.addWidget(ent, row, col + 1)
+        bind_range_to_limit(
+            self.inputs['Bias_RANGE'], self.inputs['Bias_I_LIMIT']
+        )
         box_vbox.addWidget(bias_box)
 
         gate_box = QGroupBox('栅压参数')
         gate_box.setFont(self.bold_font)
         gate_grid = QGridLayout(gate_box)
+        configure_parameter_grid(gate_grid)
         gate_items = [
             ('第一目标电压 (V):', 'Vg_1st', '5.0'),
             ('第二目标电压 (V):', 'Vg_2nd', '-5.0'),
-            ('栅压步长 (V) (正):', 'Vg_step', '0.05'),
-            ('栅压量程 (V):', 'Gate_VOLT_RANGE', '20.0'),
+            ('扫描步长 (V):', 'Vg_step', '0.05'),
+            ('电压量程 (V):', 'Gate_VOLT_RANGE', '20.0'),
             ('电流保护阈值 (A):', 'Ig_THRESHOLD', '1e-9'),
-            ('稳定时间 (s):', 'SETTLE_TIME', '0.1'),
+            ('栅压稳定时间 (s):', 'SETTLE_TIME', '0.1'),
         ]
         for i, (label, key, default) in enumerate(gate_items):
             row = i % 3
             col = (i // 3) * 2
             lbl = QLabel(label)
-            lbl.setFont(self.ui_font)
+            style_parameter_label(lbl, self.ui_font)
             gate_grid.addWidget(lbl, row, col)
             ent = QLineEdit(default)
-            ent.setFont(self.ui_font)
+            style_parameter_control(ent, self.ui_font)
             self.inputs[key] = ent
             gate_grid.addWidget(ent, row, col + 1)
         box_vbox.addWidget(gate_box)
 
         path_box = QGroupBox('文件保存路径')
         path_box.setFont(self.bold_font)
-        path_layout_box = QVBoxLayout(path_box)
-
-        lbl_prefix = QLabel('文件名前缀 (后缀自动追加 _seg1.txt 等):')
-        lbl_prefix.setFont(self.ui_font)
-        path_layout_box.addWidget(lbl_prefix)
+        path_layout_box = QGridLayout(path_box)
 
         self.file_prefix = QLineEdit('Isd_Vg')
         self.file_prefix.setFont(self.ui_font)
         self.inputs['FILE_PREFIX'] = self.file_prefix
-        path_layout_box.addWidget(self.file_prefix)
-
-        lbl_folder = QLabel('保存文件夹:')
-        lbl_folder.setFont(self.ui_font)
-        path_layout_box.addWidget(lbl_folder)
-
-        folder_hbox = QHBoxLayout()
-        folder_hbox.setContentsMargins(0, 0, 0, 0)
-        self.folder_input = QLineEdit(
-            default_data_directory("Isd_Vg_setVsd"))
+        self.folder_input = QLineEdit('Isd_Vg')
         self.folder_input.setFont(self.ui_font)
         self.inputs['FILE_FOLDER'] = self.folder_input
-        folder_hbox.addWidget(self.folder_input)
-
-        btn_browse = QPushButton('浏览')
-        btn_browse.setFont(self.ui_font)
-        btn_browse.clicked.connect(self.browse_folder)
-        folder_hbox.addWidget(btn_browse)
-        path_layout_box.addLayout(folder_hbox)
+        configure_output_path(
+            self, path_layout_box, self.folder_input, self.file_prefix,
+            self.data_settings, 'Isd_Vg', filename_is_prefix=True,
+            hint='后缀自动追加：_seg1 至 _seg4',
+        )
 
         box_vbox.addWidget(path_box)
         box_vbox.addStretch()
@@ -743,11 +722,6 @@ class IsdVgSetVsdWidget(BaseAppWidget):
 
         right_layout.addWidget(btn_area)
 
-    def browse_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, '选择保存文件夹')
-        if folder:
-            self.folder_input.setText(folder)
-
     def log_info(self, msg):
         self.log_text.append(msg)
         self.log_text.verticalScrollBar().setValue(
@@ -774,6 +748,7 @@ class IsdVgSetVsdWidget(BaseAppWidget):
 
             for key, entry in self.inputs.items():
                 if isinstance(entry, QComboBox):
+                    preset[key] = combo_config_value(entry)
                     continue
                 val = entry.text().strip()
                 if key in ['Vg_step', 'Bias_step']:
@@ -783,8 +758,6 @@ class IsdVgSetVsdWidget(BaseAppWidget):
                     preset[key] = step_val
                 elif key in ['FILE_PREFIX', 'FILE_FOLDER']:
                     preset[key] = val
-                elif key == 'Bias_RANGE' and val.upper() == 'AUTO':
-                    preset[key] = 'AUTO'
                 else:
                     preset[key] = float(val)
             preset['Gate_I_LIMIT'] = 1e-9
@@ -812,7 +785,7 @@ class IsdVgSetVsdWidget(BaseAppWidget):
             self.mark_measurement_finished(self.module_id)
             return
 
-        folder = self.folder_input.text()
+        folder = self.resolved_output_folder()
         try:
             os.makedirs(folder, exist_ok=True)
             test_file = os.path.join(folder, '.write_test')
@@ -837,6 +810,7 @@ class IsdVgSetVsdWidget(BaseAppWidget):
             self.curves_zero[i].setData([], [])
 
         self.points_changed = True
+        self.status_labels['progress'].setText('0/4')
         self.status_labels['stage'].setText('仪器初始化中')
 
         while not self.update_queue.empty():
@@ -935,6 +909,7 @@ class IsdVgSetVsdWidget(BaseAppWidget):
                 self.status_labels['vg'].setText(f"{vg:.6f}")
                 self.status_labels['isd'].setText(f"{isd:.2e}")
                 self.status_labels['ig'].setText(f"{ig:.2e}")
+                self.status_labels['progress'].setText(f'{int(seg)}/4')
                 self.status_labels['stage'].setText('栅压扫描中')
                 if vsd_fixed != 0:
                     self.status_labels['cond'].setText(f"{(isd / vsd_fixed) / G0:.6e}")
@@ -976,6 +951,8 @@ class IsdVgSetVsdWidget(BaseAppWidget):
 
             elif msg_type == 'finished':
                 all_vg, all_isd, all_ig, all_seg, vsd_fixed, scan_completed, reason = payload
+                if scan_completed:
+                    self.status_labels['progress'].setText('4/4')
                 self._reset_btns()
                 result_status = 'complete' if scan_completed else (
                     'error' if reason == 'error' else 'partial'
@@ -992,7 +969,7 @@ class IsdVgSetVsdWidget(BaseAppWidget):
                         all_ig,
                         all_seg,
                         vsd_fixed,
-                        self.folder_input.text().strip(),
+                        self.resolved_output_folder(),
                         self.file_prefix.text().strip() or 'IsdVg',
                         result_status,
                         None if scan_completed else reason,

@@ -65,7 +65,7 @@ class PlotConfigurationTests(unittest.TestCase):
         self.assertEqual(factor, 1e9)
         np.testing.assert_allclose(values, [-2.0, 0.0, 2.0])
 
-    def test_old_configuration_gets_complete_plot_defaults(self):
+    def test_partial_configuration_gets_complete_plot_defaults(self):
         settings = merge_plot_settings({'auto_plot': False})
         self.assertFalse(settings['auto_plot'])
         self.assertIn('mapping_scan', settings['modules'])

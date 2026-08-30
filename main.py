@@ -13,7 +13,6 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
-    QMenu,
     QMessageBox,
     QPushButton,
     QStackedWidget,
@@ -21,7 +20,6 @@ from PyQt6.QtWidgets import (
     QWidget,
     QFileDialog,
     QDialog,
-    QTextEdit,
     QLineEdit,
     QComboBox,
     QCheckBox,
@@ -30,9 +28,10 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
 )
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont, QFontMetrics
+from PyQt6.QtGui import QFont, QFontMetrics, QIcon
 
-from core.paths import readme_path
+from core.paths import DataRootSettings, readme_path, resource_path
+from core.ui_builder import combo_config_value, set_combo_config_value
 from core.hardware_base import validate_2450_idn
 from core.instrument_config import InstrumentSettings, UNSELECTED_TEXT
 from modules.iv_curve import IVWidget
@@ -56,14 +55,14 @@ from core.plotting import (
 def parse_config_modules(config_data):
     if not isinstance(config_data, dict):
         raise ValueError('配置文件根节点必须是JSON对象')
-    schema_version = config_data.get('__schema_version__', 1)
+    schema_version = config_data.get('__schema_version__')
     try:
         schema_version = int(schema_version)
     except (TypeError, ValueError) as exc:
         raise ValueError(f'无效配置版本: {schema_version}') from exc
-    if schema_version not in (1, 2):
+    if schema_version != 3:
         raise ValueError(f'不支持的配置版本: {schema_version}')
-    modules = config_data.get('modules', {}) if schema_version == 2 else config_data
+    modules = config_data.get('modules', {})
     if not isinstance(modules, dict):
         raise ValueError('配置中的 modules 必须是JSON对象')
     return schema_version, modules
@@ -88,9 +87,10 @@ class RunGuard:
 
 
 class WelcomePage(QWidget):
-    def __init__(self, instrument_settings, parent=None):
+    def __init__(self, instrument_settings, data_settings=None, parent=None):
         super().__init__(parent)
         self.instrument_settings = instrument_settings
+        self.data_settings = data_settings or DataRootSettings(parent=self)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(20)
@@ -126,6 +126,7 @@ class WelcomePage(QWidget):
         left_layout.addStretch()
         left_layout.addWidget(title)
         left_layout.addWidget(self._build_instrument_group())
+        left_layout.addWidget(self._build_storage_group())
         left_layout.addStretch()
 
         right = QFrame()
@@ -147,9 +148,9 @@ class WelcomePage(QWidget):
         
         tips_html = (
             "<p style='margin: 10px 0; font-size: 12pt;'><b>1. 硬件连接：</b>请确保 Keithley 源表已通过 GPIB 妥善连接。</p>"
-            "<p style='margin: 10px 0; font-size: 12pt;'><b>2. 初始化：</b>请先在欢迎页点击“扫描设备”，选择并检测仪器连接。</p>"
-            "<p style='margin: 10px 0; font-size: 12pt;'><b>3. 参数保存：</b>本系统支持“文件 -> 保存/加载配置”，可一键备份并恢复所有 7 个模块的测试参数。</p>"
-            "<p style='margin: 10px 0; font-size: 12pt;'><b>4. 扫描顺序：</b>所有模块的步长输入均强制要求为正，扫描方向由起始终止电压的大小关系自动确定。</p>"
+            "<p style='margin: 10px 0; font-size: 12pt;'><b>2. 初始化：</b>请先在首页点击“扫描设备”，选择并检测仪器连接。</p>"
+            "<p style='margin: 10px 0; font-size: 12pt;'><b>3. 参数保存：</b>点击“文件 -> 保存/加载配置”，可一键备份并恢复所有 7 个模块的测试参数。</p>"
+            "<p style='margin: 10px 0; font-size: 12pt;'><b>4. 扫描顺序：</b>所有模块的步长均强制要求为正，扫描方向由起始终止电压的大小关系自动确定。</p>"
             "<p style='margin: 10px 0; font-size: 12pt;'><b>5. 极限性能警告：</b>高频采样时，请尽量避免后台高负载任务。</p>"
             "<p style='margin: 10px 0; font-size: 12pt;'><b>6. 紧急制动：</b>若测试遇险，请立即点击各界面右下角红色“强制终止”按钮。</p>"
         )
@@ -164,6 +165,34 @@ class WelcomePage(QWidget):
 
         layout.addWidget(left, stretch=1)
         layout.addWidget(right, stretch=1)
+
+    def _build_storage_group(self):
+        group = QGroupBox('数据保存根目录')
+        font = QFont('Arial', 12)
+        group.setFont(font)
+        row = QHBoxLayout(group)
+        self.data_root_input = QLineEdit(self.data_settings.root)
+        self.data_root_input.setFont(font)
+        self.data_root_input.setPlaceholderText('可手动输入根目录')
+        browse = QPushButton('选择')
+        browse.setFont(font)
+        browse.setFixedWidth(80)
+        row.addWidget(self.data_root_input, 1)
+        row.addWidget(browse)
+        self.data_root_input.editingFinished.connect(
+            lambda: self.data_settings.set_root(self.data_root_input.text())
+        )
+        browse.clicked.connect(self._browse_data_root)
+        self.data_settings.changed.connect(self.data_root_input.setText)
+        return group
+
+    def _browse_data_root(self):
+        folder = QFileDialog.getExistingDirectory(
+            self, '选择数据保存根目录', self.data_root_input.text()
+        )
+        if folder:
+            self.data_root_input.setText(folder)
+            self.data_settings.set_root(folder)
 
     def _build_instrument_group(self):
         group = QGroupBox('仪器选择')
@@ -445,9 +474,11 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Keithley 2450 电学测试系统")
+        self.setWindowIcon(QIcon(str(resource_path('assets', 'app_icon.ico'))))
 
         self.run_guard = RunGuard()
         self.instrument_settings = InstrumentSettings()
+        self.data_settings = DataRootSettings(parent=self)
         self.plot_settings = load_default_plot_settings(default_plot_settings())
         self.plot_manager = PlotManager(self.plot_settings, self)
         self.plot_manager.plot_finished.connect(self._on_plot_finished)
@@ -505,7 +536,7 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
 
         self.page_names = [
-            "欢迎",
+            "首页",
             "断裂结",
             "循环IV特性扫描",
             "栅压特性扫描",
@@ -515,7 +546,9 @@ class MainWindow(QMainWindow):
             "任意栅压波形测试",
         ]
 
-        self.welcome_page = WelcomePage(self.instrument_settings)
+        self.welcome_page = WelcomePage(
+            self.instrument_settings, self.data_settings
+        )
         self.stack.addWidget(self.welcome_page)
 
         for name in self.page_names[1:]:
@@ -523,36 +556,44 @@ class MainWindow(QMainWindow):
                 self.stack.addWidget(BreakJunctionWidget(
                     run_guard=self.run_guard,
                     instrument_settings=self.instrument_settings,
+                    data_settings=self.data_settings,
                 ))
             elif name == "循环IV特性扫描":
                 self.stack.addWidget(IVWidget(
                     run_guard=self.run_guard,
                     instrument_settings=self.instrument_settings,
+                    data_settings=self.data_settings,
                 ))
             elif name == "栅压特性扫描":
                 self.stack.addWidget(IsdVgSetVsdWidget(
                     run_guard=self.run_guard,
                     instrument_settings=self.instrument_settings,
+                    data_settings=self.data_settings,
                 ))
             elif name == "二维Mapping扫描":
                 self.stack.addWidget(MappingWidget(
                     run_guard=self.run_guard,
                     instrument_settings=self.instrument_settings,
+                    data_settings=self.data_settings,
                 ))
             elif name == "It特性扫描":
                 self.stack.addWidget(ItStepWidget(
                     run_guard=self.run_guard,
                     instrument_settings=self.instrument_settings,
+                    data_settings=self.data_settings,
+                    plot_settings_provider=lambda: self.plot_settings,
                 ))
             elif name == "任意偏压波形测试":
                 self.stack.addWidget(ArbitraryBiasWidget(
                     run_guard=self.run_guard,
                     instrument_settings=self.instrument_settings,
+                    data_settings=self.data_settings,
                 ))
             elif name == "任意栅压波形测试":
                 self.stack.addWidget(ArbitraryGateWidget(
                     run_guard=self.run_guard,
                     instrument_settings=self.instrument_settings,
+                    data_settings=self.data_settings,
                 ))
             else:
                 self.stack.addWidget(PlaceholderPage(name))
@@ -636,13 +677,17 @@ class MainWindow(QMainWindow):
 
     def save_config(self):
         try:
+            self.data_settings.set_root(
+                self.welcome_page.data_root_input.text()
+            )
             fp, _ = QFileDialog.getSaveFileName(self, "保存测试配置", "", "JSON Files (*.json)")
             if not fp:
                 return
 
             config_data = {
-                '__schema_version__': 2,
+                '__schema_version__': 3,
                 'instruments': self.instrument_settings.to_config(),
+                'storage': {'root': self.data_settings.root},
                 'modules': {},
                 'plotting': self.plot_settings,
             }
@@ -656,7 +701,7 @@ class MainWindow(QMainWindow):
                 # 遍历通用表单控件
                 for key, control in widget.inputs.items():
                     if isinstance(control, QComboBox):
-                        mod_data[key] = control.currentText()
+                        mod_data[key] = combo_config_value(control)
                     elif isinstance(control, QLineEdit):
                         mod_data[key] = control.text()
                 
@@ -666,9 +711,15 @@ class MainWindow(QMainWindow):
                         controls[attr_name] = attr_value.isChecked()
                 if controls:
                     mod_data['__controls__'] = controls
-                if hasattr(widget, 'ent_folder') and isinstance(widget.ent_folder, QLineEdit):
+                if hasattr(widget, 'output_subfolder_input'):
+                    mod_data['__subfolder__'] = widget.output_subfolder_input.text()
+                    if hasattr(widget, 'combined_output_input'):
+                        mod_data['__output_path__'] = (
+                            widget.combined_output_input.text()
+                        )
+                elif hasattr(widget, 'ent_folder') and isinstance(widget.ent_folder, QLineEdit):
                     mod_data['__folder__'] = widget.ent_folder.text()
-                if hasattr(widget, 'folder_input') and isinstance(widget.folder_input, QLineEdit):
+                elif hasattr(widget, 'folder_input') and isinstance(widget.folder_input, QLineEdit):
                     mod_data['__folder__'] = widget.folder_input.text()
                 if hasattr(widget, 'waveform'):
                     mod_data['__waveform__'] = [
@@ -723,6 +774,9 @@ class MainWindow(QMainWindow):
             self.instrument_settings.load_config(
                 config_data.get('instruments', {})
             )
+            storage = config_data.get('storage', {})
+            if isinstance(storage, dict) and str(storage.get('root', '')).strip():
+                self.data_settings.set_root(storage['root'])
             self.welcome_page.set_settings(self.instrument_settings)
 
             for i in range(1, self.stack.count()):
@@ -738,11 +792,7 @@ class MainWindow(QMainWindow):
                     if key in mod_data:
                         val = mod_data[key]
                         if isinstance(control, QComboBox):
-                            idx = control.findText(val)
-                            if idx >= 0:
-                                control.setCurrentIndex(idx)
-                            else:
-                                control.setEditText(val)
+                            set_combo_config_value(control, val)
                         elif isinstance(control, QLineEdit):
                             if key.lower() in {'folder', 'file_folder'} and not str(val).strip():
                                 continue
@@ -789,6 +839,19 @@ class MainWindow(QMainWindow):
                         widget.ent_folder.setText(str(mod_data['__folder__']))
                     if hasattr(widget, 'folder_input'):
                         widget.folder_input.setText(str(mod_data['__folder__']))
+                if str(mod_data.get('__subfolder__', '')).strip() and hasattr(
+                    widget, 'output_subfolder_input'
+                ):
+                    widget.output_subfolder_input.setText(
+                        str(mod_data['__subfolder__'])
+                    )
+                if hasattr(widget, 'set_combined_output_path'):
+                    if str(mod_data.get('__output_path__', '')).strip():
+                        widget.set_combined_output_path(
+                            str(mod_data['__output_path__'])
+                        )
+                    else:
+                        widget.refresh_combined_output_from_parts()
                 if '__waveform__' in mod_data and hasattr(widget, 'waveform'):
                     waveform = [
                         [float(value) for value in row]
@@ -819,9 +882,10 @@ class MainWindow(QMainWindow):
                         if hasattr(widget, '_update_gate_summary'):
                             widget._update_gate_summary()
 
-            self.plot_settings = merge_plot_settings(
-                config_data.get('plotting')
-            )
+            plotting_config = config_data.get('plotting')
+            if not isinstance(plotting_config, dict):
+                plotting_config = {}
+            self.plot_settings = merge_plot_settings(plotting_config)
             self.plot_manager.update_settings(self.plot_settings)
             self.action_auto_plot.blockSignals(True)
             self.action_auto_plot.setChecked(
@@ -980,7 +1044,15 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    if sys.platform == 'win32':
+        # Give source launches their own taskbar identity instead of inheriting
+        # the generic python.exe/pythonw.exe icon and taskbar group.
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            'K2450.ElectricalTestSystem'
+        )
     app = QApplication(sys.argv)
+    app.setWindowIcon(QIcon(str(resource_path('assets', 'app_icon.ico'))))
     window = MainWindow()
     window.showMaximized()
     sys.exit(app.exec())

@@ -8,7 +8,6 @@ import numpy as np
 import pyvisa
 
 from PyQt6.QtWidgets import (
-    QApplication,
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
@@ -19,7 +18,6 @@ from PyQt6.QtWidgets import (
     QGroupBox,
     QTextEdit,
     QScrollArea,
-    QFileDialog,
     QMessageBox,
     QSizePolicy,
     QComboBox,
@@ -36,7 +34,7 @@ from PyQt6.QtGui import QFont
 import pyqtgraph as pg
 
 from core.app_base import BaseAppWidget
-from core.paths import default_data_directory
+from core.paths import DataRootSettings
 from core.hardware_base import (
     allocate_unique_path,
     atomic_text_writer,
@@ -62,7 +60,12 @@ from core.hardware_base import (
     write_result_metadata,
 )
 from core.instrument_config import InstrumentSettings
-from core.utils import G0, _0, _1, _2, _3, configure_pyqtgraph
+from core.ui_builder import (
+    bind_range_to_limit, combo_config_value, configure_output_path,
+    configure_parameter_grid, create_current_range_combo, create_status_group,
+    style_parameter_control, style_parameter_label, update_scroll_area_layout,
+)
+from core.utils import G0, _0, _1, _2, _3
 
 
 class GateLeakageError(RuntimeError):
@@ -902,9 +905,6 @@ class IV_Measurement:
                     return
                 self.keithley.write(f':SOUR:VOLT {v}')
                 
-                if not self._interruptible_sleep(self.params['settle_time'], "测量中..."):
-                    return
-                    
                 try:
                     curr = required_float_query(
                         self.keithley, ':READ?', 'IV正式电流读数'
@@ -1124,7 +1124,7 @@ class IV_Measurement:
 
 
 class IVWidget(BaseAppWidget):
-    def __init__(self, run_guard=None, instrument_settings=None, parent=None):
+    def __init__(self, run_guard=None, instrument_settings=None, data_settings=None, parent=None):
         super().__init__(run_guard, parent)
         self.module_id = 'iv_curve'
         self.module_name = '循环IV特性扫描'
@@ -1132,6 +1132,7 @@ class IVWidget(BaseAppWidget):
             bias_address='GPIB0::1::INSTR',
             gate_address='GPIB0::2::INSTR',
         )
+        self.data_settings = data_settings or DataRootSettings(parent=self)
         
         self.ui_font = QFont("Arial", 12)
         self.ui_font.setWeight(QFont.Weight.Normal)
@@ -1195,16 +1196,6 @@ class IVWidget(BaseAppWidget):
         right_layout = QVBoxLayout()
         main_layout.addLayout(right_layout, stretch=2)
 
-        status_group = QGroupBox("实时状态显示")
-        status_group.setFont(self.bold_font)
-        status_group.setFixedHeight(135)
-        status_layout = QGridLayout(status_group)
-
-        status_layout.setColumnStretch(1, 1)
-        status_layout.setColumnStretch(3, 1)
-        status_layout.setHorizontalSpacing(10)
-
-        self.status_labels = {}
         status_items = [
             ("偏压 Vsd (V):", "bias_v", 0, 0),
             ("电阻 (Ω):", "R", 1, 2),
@@ -1215,26 +1206,23 @@ class IVWidget(BaseAppWidget):
             ("栅电流 Ig (A):", "gate_i", 3, 0),
             ("系统状态:", "stage", 3, 2),
         ]
-        for text, key, row, col in status_items:
-            lbl = QLabel(text)
-            lbl.setFont(self.ui_font)
-            lbl.setStyleSheet("font-weight: normal;")
-            status_layout.addWidget(lbl, row, col, alignment=Qt.AlignmentFlag.AlignLeft)
-
-            val = QLabel("-")
-            val.setFont(self.bold_font)
-            val.setStyleSheet("color: #0055A4;")
-            status_layout.addWidget(val, row, col + 1, alignment=Qt.AlignmentFlag.AlignLeft)
-            self.status_labels[key] = val
+        status_group, self.status_labels = create_status_group(
+            status_items, self.ui_font, self.bold_font
+        )
         right_layout.addWidget(status_group)
 
         param_group = QGroupBox("测量参数")
         param_group.setFont(self.bold_font)
+        self.parameter_panel = param_group
         param_layout = QVBoxLayout(param_group)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOn
+        )
+        self.parameter_scroll = scroll
         scroll_content = QWidget()
         scroll_content.setFont(self.ui_font)
         scroll_content_layout = QVBoxLayout(scroll_content)
@@ -1250,10 +1238,7 @@ class IVWidget(BaseAppWidget):
         self.gate_group = QGroupBox('栅压参数')
         self.gate_group.setFont(self.bold_font)
         gate_grid = QGridLayout(self.gate_group)
-        gate_grid.setColumnStretch(0, 0)
-        gate_grid.setColumnStretch(1, 0)
-        gate_grid.setColumnStretch(2, 1)
-        gate_grid.setColumnStretch(3, 1)
+        configure_parameter_grid(gate_grid)
         self.btn_gate_settings = QPushButton('设置栅压序列...')
         self.btn_gate_settings.setFont(self.bold_font)
         self.btn_gate_settings.setStyleSheet('color: #B35A00;')
@@ -1277,25 +1262,24 @@ class IVWidget(BaseAppWidget):
 
         def add_gate_parameter(row, column, text, key, default):
             label = QLabel(text)
-            label.setFont(self.ui_font)
-            label.setStyleSheet('font-weight: normal;')
+            style_parameter_label(label, self.ui_font)
             control = QLineEdit(str(default))
-            control.setFont(self.ui_font)
+            style_parameter_control(control, self.ui_font)
             gate_grid.addWidget(label, row, column)
             gate_grid.addWidget(control, row, column + 1)
             self.inputs[key] = control
 
         defaults = default_iv_gate_settings()
         add_gate_parameter(
-            2, 0, '栅压量程 (V):',
+            2, 0, '电压量程 (V):',
             'gate_voltage_range', defaults['gate_voltage_range']
         )
         add_gate_parameter(
-            2, 2, '栅表 NPLC:',
+            2, 2, '测量 NPLC:',
             'gate_nplc', defaults['gate_nplc']
         )
         add_gate_parameter(
-            3, 0, '栅极限流 (A):',
+            3, 0, '电流限制 (A):',
             'gate_ilimit', defaults['gate_ilimit']
         )
         add_gate_parameter(
@@ -1303,11 +1287,11 @@ class IVWidget(BaseAppWidget):
             'gate_leakage_limit', defaults['gate_leakage_limit']
         )
         add_gate_parameter(
-            4, 0, '栅压爬坡/归零步长 (V):',
+            4, 0, '爬坡/归零步长 (V):',
             'gate_ramp_step', defaults['gate_ramp_step']
         )
         add_gate_parameter(
-            4, 2, '栅压单步等待 (s):',
+            4, 2, '栅压单步延时 (s):',
             'gate_step_delay', defaults['gate_step_delay']
         )
         add_gate_parameter(
@@ -1315,7 +1299,7 @@ class IVWidget(BaseAppWidget):
             'gate_settle', defaults['gate_settle']
         )
         add_gate_parameter(
-            5, 2, 'Vg组间等待 (s):',
+            5, 2, '栅压组间等待 (s):',
             'gate_group_wait', defaults['gate_group_wait']
         )
         scroll_content_layout.addWidget(self.gate_group)
@@ -1327,11 +1311,7 @@ class IVWidget(BaseAppWidget):
         scan_layout.setContentsMargins(12, 18, 12, 12)
 
         def align_parameter_grid(grid):
-            grid.setColumnMinimumWidth(0, 150)
-            grid.setColumnMinimumWidth(2, 150)
-            grid.setColumnStretch(1, 1)
-            grid.setColumnStretch(3, 1)
-            grid.setHorizontalSpacing(10)
+            configure_parameter_grid(grid)
 
         mode_grid = QGridLayout()
         mode_grid.setContentsMargins(0, 0, 0, 0)
@@ -1364,15 +1344,14 @@ class IVWidget(BaseAppWidget):
         align_parameter_grid(range_grid)
         self.lbl_v_start = QLabel('起始电压 (V):')
         self.lbl_v_end = QLabel('终止电压 (V):')
-        self.lbl_v_step = QLabel('扫描步长 (V) (正):')
+        self.lbl_v_step = QLabel('扫描步长 (V):')
         for label in (self.lbl_v_start, self.lbl_v_end, self.lbl_v_step):
-            label.setFont(self.ui_font)
-            label.setFixedWidth(150)
+            style_parameter_label(label, self.ui_font)
         for key, default in (
             ('v_start', '-1.0'), ('v_end', '1.0'), ('v_step', '0.02')
         ):
             self.inputs[key] = QLineEdit(default)
-            self.inputs[key].setFont(self.ui_font)
+            style_parameter_control(self.inputs[key], self.ui_font)
         range_grid.addWidget(self.lbl_v_start, 0, 0)
         range_grid.addWidget(self.inputs['v_start'], 0, 1)
         range_grid.addWidget(self.lbl_v_end, 0, 2)
@@ -1401,7 +1380,13 @@ class IVWidget(BaseAppWidget):
             'font-weight: normal; color: #005500;'
         )
         custom_grid.addWidget(self.lbl_custom_iv_summary, 0, 2, 1, 2)
+        # Keep both stack pages the same height so changing scan mode does not
+        # move the parameter groups below it.
+        custom_grid.setRowMinimumHeight(
+            1, self.inputs['v_step'].sizeHint().height()
+        )
         self.iv_mode_stack.addWidget(custom_page)
+        self.iv_mode_stack.setFixedHeight(70)
         scan_layout.addWidget(self.iv_mode_stack)
         scroll_content_layout.addWidget(scan_group)
 
@@ -1412,20 +1397,24 @@ class IVWidget(BaseAppWidget):
         align_parameter_grid(common_grid)
         common_items = (
             ('电流限制 (A):', 'i_limit', '1.05e-6', 0, 0),
-            ('NPLC:', 'nplc', '1.0', 0, 2),
-            ('稳定时间 (s):', 'settle_time', '0.0', 1, 0),
-            ('电流量程 (A/AUTO):', 'current_range', '1e-6', 1, 2),
-            ('循环次数:', 'cycles', '1', 2, 0),
+            ('测量 NPLC:', 'nplc', '1.0', 0, 2),
+            ('电流量程 (A):', 'current_range', '1e-6', 1, 0),
+            ('循环次数:', 'cycles', '1', 1, 2),
         )
         for text, key, default, row, column in common_items:
             label = QLabel(text)
-            label.setFont(self.ui_font)
-            label.setFixedWidth(150)
-            control = QLineEdit(default)
-            control.setFont(self.ui_font)
+            style_parameter_label(label, self.ui_font)
+            control = (
+                create_current_range_combo(default, True, self.ui_font)
+                if key == 'current_range' else QLineEdit(default)
+            )
+            style_parameter_control(control, self.ui_font)
             common_grid.addWidget(label, row, column)
             common_grid.addWidget(control, row, column + 1)
             self.inputs[key] = control
+        bind_range_to_limit(
+            self.inputs['current_range'], self.inputs['i_limit']
+        )
         scroll_content_layout.addWidget(acquisition_group)
         self.refresh_iv_mode_controls()
 
@@ -1433,32 +1422,16 @@ class IVWidget(BaseAppWidget):
         path_group.setFont(self.bold_font)
         path_grid = QGridLayout(path_group)
 
-        lbl_prefix = QLabel("文件名前缀 (后缀自动追加模式、电压、循环信息)：")
-        lbl_prefix.setFont(self.ui_font)
-        path_grid.addWidget(lbl_prefix, 0, 0, 1, 2)
-
         ent_prefix = QLineEdit("IV")
         ent_prefix.setFont(self.ui_font)
         self.inputs['file_prefix'] = ent_prefix
-        path_grid.addWidget(ent_prefix, 1, 0, 1, 2)
-
-        lbl_folder = QLabel("保存文件夹：")
-        lbl_folder.setFont(self.ui_font)
-        path_grid.addWidget(lbl_folder, 2, 0, 1, 2)
-
-        folder_hbox = QHBoxLayout()
-        folder_hbox.setContentsMargins(0, 0, 0, 0)
-        self.folder_input = QLineEdit(default_data_directory("IV"))
+        self.folder_input = QLineEdit('IV')
         self.folder_input.setFont(self.ui_font)
-        folder_hbox.addWidget(self.folder_input)
-
-        btn_browse = QPushButton("浏览")
-        btn_browse.setFont(self.ui_font)
-        btn_browse.setFixedWidth(80)
-        btn_browse.clicked.connect(self.browse_folder)
-        folder_hbox.addWidget(btn_browse)
-
-        path_grid.addLayout(folder_hbox, 3, 0, 1, 2)
+        configure_output_path(
+            self, path_grid, self.folder_input, ent_prefix,
+            self.data_settings, 'IV', filename_is_prefix=True,
+            hint='后缀自动追加：扫描模式、电压、循环信息',
+        )
         scroll_content_layout.addWidget(path_group)
 
         scroll_content_layout.addStretch()
@@ -1633,9 +1606,14 @@ class IVWidget(BaseAppWidget):
             self.inputs[key].setText(str(settings[key]))
 
     def toggle_gate_controls(self):
-        enabled = self.cb_gate.isChecked()
-        self.gate_group.setVisible(enabled)
-        self._update_gate_summary()
+        def update_widgets():
+            enabled = self.cb_gate.isChecked()
+            self.gate_group.setVisible(enabled)
+            self._update_gate_summary()
+
+        update_scroll_area_layout(
+            self.parameter_scroll, update_widgets, self.parameter_panel
+        )
 
     def _update_gate_summary(self):
         if not self.cb_gate.isChecked():
@@ -1654,19 +1632,12 @@ class IVWidget(BaseAppWidget):
         except Exception as exc:
             self.lbl_gate_summary.setText(f'栅压设置无效：{exc}')
 
-    # ---------------- 补充的三大缺失的 UI 辅助方法 ----------------
-    def browse_folder(self):
-        d = QFileDialog.getExistingDirectory(self, "选择保存文件夹")
-        if d:
-            self.folder_input.setText(d)
-
     def log_info(self, msg):
         self.log_text.append(msg)
         self.log_text.verticalScrollBar().setValue(self.log_text.verticalScrollBar().maximum())
 
     def clear_log(self):
         self.log_text.clear()
-    # -----------------------------------------------------------
 
     def start_measurement(self):
         if self.measure_running:
@@ -1678,7 +1649,11 @@ class IVWidget(BaseAppWidget):
         self.clear_log()
 
         try:
-            p = {k: v.currentText().strip() if isinstance(v, QComboBox) else v.text().strip() for k, v in self.inputs.items()}
+            p = {
+                k: combo_config_value(v) if isinstance(v, QComboBox)
+                else v.text().strip()
+                for k, v in self.inputs.items()
+            }
             gate_enabled = self.cb_gate.isChecked()
             instrument = self.instrument_settings.snapshot(
                 require_gate=gate_enabled
@@ -1687,7 +1662,6 @@ class IVWidget(BaseAppWidget):
             params = {
                 'address': instrument['bias_address'],
                 'i_limit': float(p['i_limit']),
-                'settle_time': float(p['settle_time']),
                 'nplc': float(p['nplc']),
                 'terminal': instrument['bias_terminal'],
                 'cycles': int(p['cycles']),
@@ -1721,19 +1695,19 @@ class IVWidget(BaseAppWidget):
                     raise ValueError("起止电压不能相等")
             if params['cycles'] <= 0:
                 raise ValueError("循环次数必须大于 0")
-            if params['settle_time'] < 0:
-                raise ValueError("稳定时间不能为负值")
             if params['nplc'] <= 0:
                 raise ValueError("NPLC 必须大于 0")
             if params['i_limit'] <= 0:
                 raise ValueError("电流限制必须大于 0")
 
             r_val = p['current_range']
-            params['current_range'] = r_val if r_val.upper() == 'AUTO' else float(r_val)
+            params['current_range'] = (
+                r_val if str(r_val).upper() == 'AUTO' else float(r_val)
+            )
             if not isinstance(params['current_range'], str) and params['current_range'] <= 0:
                 raise ValueError("电流量程必须大于 0 或为 AUTO")
             params['file_prefix'] = p['file_prefix']
-            params['folder'] = self.folder_input.text().strip()
+            params['folder'] = self.resolved_output_folder()
             if mode != 'custom':
                 validate_program_step_plan('iv', params)
             params['gate_enabled'] = gate_enabled
@@ -1929,7 +1903,7 @@ class IVWidget(BaseAppWidget):
                 active = dict(getattr(self, 'active_params', {}))
                 self.submit_save(
                     self.save_data,
-                    self.folder_input.text().strip(),
+                    self.resolved_output_folder(),
                     self.inputs['file_prefix'].text().strip() or 'IV',
                     active.get('mode', self.selected_iv_mode()),
                     float(active.get('v_start', 0.0)),

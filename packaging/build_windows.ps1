@@ -17,6 +17,7 @@ $builtExe = Join-Path $builtApp "$appName.exe"
 $builtRuntime = Join-Path $builtApp "runtime"
 $releaseStage = Join-Path $releaseRoot $archiveName
 $releaseZip = Join-Path $releaseRoot "$archiveName.zip"
+$iconPath = Join-Path $repoRoot "assets\app_icon.ico"
 $originalPath = $env:PATH
 
 function Assert-InBuildRoot([string]$Path) {
@@ -24,6 +25,16 @@ function Assert-InBuildRoot([string]$Path) {
     $prefix = $buildRoot.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
     if (-not $resolved.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "Refusing to modify a path outside the build directory: $Path"
+    }
+}
+
+function Remove-BuildPath([string]$Path) {
+    Assert-InBuildRoot $Path
+    if (Test-Path -LiteralPath $Path -PathType Container) {
+        Remove-Item -LiteralPath $Path -Recurse -Force
+    }
+    elseif (Test-Path -LiteralPath $Path) {
+        Remove-Item -LiteralPath $Path -Force
     }
 }
 
@@ -39,6 +50,9 @@ try {
         & $Python -m unittest discover -s tests -t . -v
         if ($LASTEXITCODE -ne 0) { throw "Tests failed; packaging stopped." }
     }
+    if (-not (Test-Path -LiteralPath $iconPath -PathType Leaf)) {
+        throw "The application icon was not found: $iconPath"
+    }
 
     Write-Host "[2/3] Building the Windows application..."
     # Developer tools may prepend incompatible native runtimes to PATH.
@@ -50,6 +64,8 @@ try {
         --clean `
         --onedir `
         --windowed `
+        --icon $iconPath `
+        --add-data "$iconPath;assets" `
         --name $appName `
         --contents-directory runtime `
         --distpath $distRoot `
@@ -70,14 +86,8 @@ try {
     }
 
     Write-Host "[3/3] Creating the GitHub Release archive..."
-    Assert-InBuildRoot $releaseStage
-    Assert-InBuildRoot $releaseZip
-    if (Test-Path -LiteralPath $releaseStage) {
-        Remove-Item -LiteralPath $releaseStage -Recurse -Force
-    }
-    if (Test-Path -LiteralPath $releaseZip) {
-        Remove-Item -LiteralPath $releaseZip -Force
-    }
+    Remove-BuildPath $releaseStage
+    Remove-BuildPath $releaseZip
     New-Item -ItemType Directory -Path $releaseStage -Force | Out-Null
     Copy-Item -LiteralPath $builtExe -Destination $releaseStage
     Copy-Item -LiteralPath $builtRuntime -Destination $releaseStage -Recurse
@@ -86,6 +96,14 @@ try {
     Compress-Archive -Path (Join-Path $releaseStage "*") -DestinationPath $releaseZip -CompressionLevel Optimal
 
     $zipSize = [math]::Round((Get-Item -LiteralPath $releaseZip).Length / 1MB, 1)
+    foreach ($temporaryPath in @(
+        $releaseStage,
+        $distRoot,
+        $workRoot,
+        $specRoot
+    )) {
+        Remove-BuildPath $temporaryPath
+    }
     Write-Host "Done: $releaseZip ($zipSize MB)"
 }
 finally {

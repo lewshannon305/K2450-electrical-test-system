@@ -12,7 +12,8 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 import numpy as np
 from PyQt6.QtCore import QPoint, Qt
-from PyQt6.QtWidgets import QApplication, QFrame, QGroupBox
+from PyQt6.QtGui import QFont
+from PyQt6.QtWidgets import QApplication, QFrame, QGroupBox, QLabel
 
 from core.hardware_base import (
     InstrumentConfigurationError,
@@ -64,7 +65,9 @@ from modules.arbitrary_gate import ArbitraryGateWidget, GateArbMeasurement
 from main import MainWindow, WelcomePage, parse_config_modules
 from core.app_base import BaseAppWidget
 from core.instrument_config import InstrumentSettings
+from core.paths import resource_path
 from core.time_acquisition import InternalSegmentCollector, timing_metadata
+from core.ui_builder import create_status_group
 
 
 class FakeInstrument:
@@ -377,6 +380,8 @@ class GlobalInstrumentSelectionTests(unittest.TestCase):
     def test_main_window_shares_one_configuration_without_address_inputs(self):
         window = MainWindow()
         try:
+            self.assertTrue(resource_path('assets', 'app_icon.ico').is_file())
+            self.assertFalse(window.windowIcon().isNull())
             widgets = window._measurement_widgets()
             self.assertEqual(len(widgets), 7)
             for widget in widgets:
@@ -397,10 +402,235 @@ class GlobalInstrumentSelectionTests(unittest.TestCase):
             self.assertEqual(
                 [window.nav_group.button(i).text() for i in range(8)],
                 [
-                    '欢迎', '断裂结', '循环IV特性扫描', '栅压特性扫描',
+                    '首页', '断裂结', '循环IV特性扫描', '栅压特性扫描',
                     '二维Mapping扫描', 'It特性扫描',
                     '任意偏压波形测试', '任意栅压波形测试',
                 ],
+            )
+        finally:
+            window.close()
+
+    def test_shared_root_resolves_each_module_subfolder_and_updates_preview(self):
+        window = MainWindow()
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                window.data_settings.set_root(folder)
+                expected = (
+                    'Break', 'IV', 'Isd_Vg', 'Mapping', 'It',
+                    'Arbitrary_Bias', 'Arbitrary_Gate',
+                )
+                for widget, subfolder in zip(
+                    window._measurement_widgets(), expected
+                ):
+                    self.assertIs(widget.data_settings, window.data_settings)
+                    self.assertEqual(
+                        Path(widget.resolved_output_folder()),
+                        Path(folder) / subfolder,
+                    )
+                    self.assertTrue(
+                        widget.combined_output_input.text().startswith(
+                            subfolder + '/'
+                        )
+                    )
+
+                first = window.stack.widget(1)
+                absolute = Path(folder) / 'manual' / 'sample-a'
+                first.set_combined_output_path(
+                    str(absolute / 'Break2.txt')
+                )
+                self.assertEqual(
+                    Path(first.resolved_output_folder()), absolute
+                )
+                self.assertEqual(
+                    first.inputs['FILENAME'].text(), 'Break2.txt'
+                )
+        finally:
+            window.close()
+
+    def test_current_configuration_round_trip(self):
+        window = MainWindow()
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                config_path = Path(folder) / 'current.json'
+                data_root = Path(folder) / 'data'
+                break_widget = window.stack.widget(1)
+                it_widget = window.stack.widget(5)
+                window.welcome_page.data_root_input.setText(str(data_root))
+                break_widget.set_combined_output_path('Break/audit.txt')
+                it_widget.rb_meas_time.setChecked(True)
+
+                with (
+                    patch(
+                        'main.QFileDialog.getSaveFileName',
+                        return_value=(str(config_path), 'JSON Files (*.json)'),
+                    ),
+                    patch.object(window, '_show_info') as save_message,
+                ):
+                    window.save_config()
+                self.assertTrue(config_path.is_file())
+                saved = json.loads(config_path.read_text(encoding='utf-8'))
+                self.assertEqual(saved['__schema_version__'], 3)
+                self.assertEqual(saved['storage']['root'], str(data_root))
+                self.assertFalse(any(
+                    call.args and call.args[0] == '错误'
+                    for call in save_message.call_args_list
+                ))
+
+                window.welcome_page.data_root_input.setText('C:/changed')
+                break_widget.set_combined_output_path('Break/changed.txt')
+                it_widget.rb_meas_points.setChecked(True)
+                with (
+                    patch(
+                        'main.QFileDialog.getOpenFileName',
+                        return_value=(str(config_path), 'JSON Files (*.json)'),
+                    ),
+                    patch.object(window, '_show_info') as load_message,
+                ):
+                    window.load_config()
+                QApplication.processEvents()
+
+                self.assertEqual(Path(window.data_settings.root), data_root)
+                self.assertEqual(
+                    break_widget.combined_output_input.text(),
+                    'Break/audit.txt',
+                )
+                self.assertTrue(it_widget.rb_meas_time.isChecked())
+                self.assertFalse(any(
+                    call.args and call.args[0] == '错误'
+                    for call in load_message.call_args_list
+                ))
+        finally:
+            window.close()
+
+    def test_all_status_panels_use_equal_left_and_right_halves(self):
+        window = MainWindow()
+        try:
+            window.resize(1600, 900)
+            window.show()
+            QApplication.processEvents()
+            for index in range(1, 8):
+                window.stack.setCurrentIndex(index)
+                QApplication.processEvents()
+                widget = window.stack.widget(index)
+                panes = {
+                    label.parentWidget()
+                    for label in widget.status_labels.values()
+                }
+                self.assertEqual(len(panes), 2)
+                widths = [pane.width() for pane in panes]
+                self.assertLessEqual(abs(widths[0] - widths[1]), 1)
+                for pane in panes:
+                    labels = pane.findChildren(
+                        QLabel, options=(
+                            Qt.FindChildOption.FindDirectChildrenOnly
+                        )
+                    )
+                    colons = [label for label in labels if label.text() == ':']
+                    self.assertTrue(colons)
+                    self.assertEqual(len({label.x() for label in colons}), 1)
+                    names = [
+                        label for label in labels
+                        if label.text() not in {':', '-'}
+                    ]
+                    self.assertTrue(all(
+                        label.alignment() & Qt.AlignmentFlag.AlignLeft
+                        for label in names
+                    ))
+        finally:
+            window.close()
+
+    def test_dynamic_parameter_panels_repaint_after_layout_settles(self):
+        window = MainWindow()
+        try:
+            window.show()
+            QApplication.processEvents()
+            for index in (2, 5, 6):
+                widget = window.stack.widget(index)
+                window.stack.setCurrentWidget(widget)
+                QApplication.processEvents()
+                widget.cb_gate.setChecked(True)
+                self.assertFalse(widget.parameter_panel.updatesEnabled())
+                QApplication.processEvents()
+                self.assertTrue(widget.parameter_panel.updatesEnabled())
+                widget.cb_gate.setChecked(False)
+                widget.cb_gate.setChecked(True)
+                widget.cb_gate.setChecked(False)
+                self.assertFalse(widget.parameter_panel.updatesEnabled())
+                QApplication.processEvents()
+                self.assertTrue(widget.parameter_panel.updatesEnabled())
+        finally:
+            window.close()
+
+    def test_approved_status_and_output_hint_texts_are_exact(self):
+        window = MainWindow()
+        try:
+            widgets = window._measurement_widgets()
+            self.assertEqual(
+                Path(window.data_settings.root),
+                Path('C:/Users/Public/Documents/K2450_Data'),
+            )
+            self.assertIn('progress', widgets[2].status_labels)
+            self.assertEqual(widgets[2].status_labels['progress'].text(), '-')
+            self.assertEqual(
+                widgets[4].lbl_measurement_mode.text(), '测量模式:'
+            )
+            self.assertEqual(
+                [widget.output_hint_label.text() for widget in widgets],
+                [
+                    '',
+                    '后缀自动追加：扫描模式、电压、循环信息',
+                    '后缀自动追加：_seg1 至 _seg4',
+                    '后缀自动追加：栅压、偏压信息',
+                    '后缀自动追加：时长/点数、栅压、偏压信息',
+                    '',
+                    '',
+                ],
+            )
+            self.assertNotIn('插入', widgets[2].output_hint_label.text())
+            self.assertNotIn('.txt', widgets[2].output_hint_label.text())
+            for widget in widgets:
+                self.assertTrue(any(
+                    label.text() == '保存路径（根目录下）：'
+                    for label in widget.findChildren(QLabel)
+                ))
+            self.assertNotIn('SETTLE_TIME', widgets[0].inputs)
+            self.assertNotIn('settle_time', widgets[1].inputs)
+            expected_time_labels = (
+                (widgets[1], {
+                    '栅压单步延时 (s):', '栅压到位等待 (s):',
+                    '栅压组间等待 (s):',
+                }),
+                (widgets[2], {
+                    '偏压到位等待 (s):', '栅压稳定时间 (s):',
+                }),
+                (widgets[4], {
+                    '栅压到位等待 (s):', '偏压到位等待 (s):',
+                    '偏压归零后等待 (s):', '测量后保持 (s):',
+                }),
+                (widgets[5], {
+                    '栅压单步延时 (s):', '栅压到位等待 (s):',
+                    '跃变缓冲时延 (s):',
+                }),
+                (widgets[6], {
+                    '偏压单步延时 (s):', '偏压到位等待 (s):',
+                    '跃变缓冲时延 (s):',
+                }),
+            )
+            for widget, expected in expected_time_labels:
+                visible_text = {
+                    label.text() for label in widget.findChildren(QLabel)
+                }
+                self.assertTrue(expected <= visible_text)
+            self.assertEqual(widgets[5].inputs['b_range'].currentData(), 1e-6)
+            self.assertEqual(widgets[6].inputs['g_range'].currentData(), 1e-6)
+            self.assertEqual(widgets[6].inputs['b_range'].currentData(), 1e-6)
+            it_widget = widgets[4]
+            window.resize(1600, 900)
+            window.stack.setCurrentWidget(it_widget)
+            window.show()
+            QApplication.processEvents()
+            self.assertEqual(
+                it_widget.rb_sample_realtime.x(), it_widget.rb_meas_time.x()
             )
         finally:
             window.close()
@@ -423,6 +653,12 @@ class GlobalInstrumentSelectionTests(unittest.TestCase):
                 self.assertFalse(forbidden & set(module), path.name)
                 gate_settings = module.get('__gate_settings__', {})
                 self.assertFalse(forbidden & set(gate_settings), path.name)
+            self.assertNotIn(
+                'SETTLE_TIME', value['modules']['break_junction'], path.name
+            )
+            self.assertNotIn(
+                'settle_time', value['modules']['iv_curve'], path.name
+            )
 
 
 class FastZeroingTests(unittest.TestCase):
@@ -646,7 +882,6 @@ class IVMultiGateTests(unittest.TestCase):
             'v_start': 0.0,
             'v_end': 0.0,
             'v_step': 0.1,
-            'settle_time': 0.0,
             'gate_enabled': True,
             'gate_ramp_step': 0.5,
             'gate_step_delay': 0.0,
@@ -936,7 +1171,6 @@ class IVScanModeTests(unittest.TestCase):
                 'v_start': values[0],
                 'v_end': values[-1],
                 'v_step': 0.01,
-                'settle_time': 0.0,
                 'gate_enabled': False,
             },
             queue.Queue(), queue.Queue(),
@@ -1030,20 +1264,12 @@ class StepDivisibilityTests(unittest.TestCase):
                 'g_start': float(it_raw['g_start']),
                 'g_end': float(it_raw['g_end']),
                 'g_test_step': float(it_raw['g_test_step']),
-                'g_ramp_step': float(
-                    it_raw['g_ramp_step_s']
-                    if controls.get('rb_g_single', True)
-                    else it_raw['g_ramp_step_st']
-                ),
+                'g_ramp_step': float(it_raw['g_ramp_step']),
                 'b_target': float(it_raw['b_target_s']),
                 'b_start': float(it_raw['b_start']),
                 'b_end': float(it_raw['b_end']),
                 'b_test_step': float(it_raw['b_test_step']),
-                'b_ramp_step': float(
-                    it_raw['b_ramp_step_s']
-                    if controls.get('rb_b_single', True)
-                    else it_raw['b_ramp_step_st']
-                ),
+                'b_ramp_step': float(it_raw['b_ramp_step']),
             }
             validate_program_step_plan('it', it)
 
@@ -1311,6 +1537,63 @@ class ItBufferTests(unittest.TestCase):
             )
         finally:
             widget.close()
+
+    def test_it_page_can_toggle_every_measurement_and_voltage_mode(self):
+        app = QApplication.instance() or QApplication([])
+        widget = ItStepWidget()
+        try:
+            widget.cb_gate.setChecked(True)
+            for button, visible_widget in (
+                (widget.rb_g_single, widget.wg_g_single),
+                (widget.rb_g_step, widget.wg_g_step),
+                (widget.rb_g_custom, widget.wg_g_custom),
+            ):
+                button.click()
+                app.processEvents()
+                self.assertFalse(visible_widget.isHidden())
+            for button, visible_widget in (
+                (widget.rb_b_single, widget.wg_b_single),
+                (widget.rb_b_step, widget.wg_b_step),
+                (widget.rb_b_custom, widget.wg_b_custom),
+            ):
+                button.click()
+                app.processEvents()
+                self.assertFalse(visible_widget.isHidden())
+            widget.rb_meas_time.click()
+            self.assertTrue(widget.inputs['duration'].isEnabled())
+            self.assertFalse(widget.inputs['num_points'].isEnabled())
+            widget.rb_meas_points.click()
+            self.assertTrue(widget.inputs['num_points'].isEnabled())
+            self.assertFalse(widget.inputs['duration'].isEnabled())
+        finally:
+            widget.close()
+
+    def test_status_group_keeps_uneven_columns_in_equal_visible_halves(self):
+        app = QApplication.instance() or QApplication([])
+        font = QFont('Arial', 12)
+        group, labels = create_status_group(
+            [
+                ('左一:', 'left_1', 0, 0), ('右一:', 'right_1', 0, 2),
+                ('左二较长:', 'left_2', 1, 0), ('右二:', 'right_2', 1, 2),
+                ('左三更长一些:', 'left_3', 2, 0), ('右三:', 'right_3', 2, 2),
+                ('左四:', 'left_4', 3, 0),
+            ],
+            font,
+            font,
+        )
+        try:
+            group.resize(600, 135)
+            group.show()
+            app.processEvents()
+            midpoint = group.width() / 2
+            self.assertLess(labels['left_1'].mapTo(group, QPoint()).x(), midpoint)
+            self.assertGreaterEqual(
+                labels['right_1'].mapTo(group, QPoint()).x(), midpoint
+            )
+            self.assertTrue(labels['left_4'].isVisible())
+            self.assertTrue(labels['right_3'].isVisible())
+        finally:
+            group.close()
 
     def test_custom_custom_run_uses_gate_major_cartesian_order(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -1668,8 +1951,66 @@ class UnifiedTimeSamplingTests(unittest.TestCase):
             for widget in widgets:
                 widget.close()
 
+    def test_it_uses_shared_mode_parameters_and_mutually_exclusive_duration(self):
+        widget = ItStepWidget()
+        try:
+            self.assertNotIn('meas_mode', widget.inputs)
+            self.assertTrue(widget.rb_meas_points.isChecked())
+            self.assertTrue(widget.inputs['num_points'].isEnabled())
+            self.assertFalse(widget.inputs['duration'].isEnabled())
+            widget.rb_meas_time.setChecked(True)
+            self.assertFalse(widget.inputs['num_points'].isEnabled())
+            self.assertTrue(widget.inputs['duration'].isEnabled())
+            for key in (
+                'g_ramp_step', 'g_ilimit', 'g_settle',
+                'g_post_zero_wait', 'b_ramp_step', 'b_range',
+                'b_ilimit', 'b_settle', 'b_post_wait',
+            ):
+                self.assertIn(key, widget.inputs)
+            self.assertFalse(any(
+                key.endswith(('_s', '_st', '_c'))
+                and key.startswith(('g_ramp', 'b_ramp', 'g_settle', 'b_settle'))
+                for key in widget.inputs
+            ))
+            self.assertFalse(hasattr(widget, 'c_mode'))
+            self.assertTrue(widget.lbl_gate_monitor_note.isHidden())
+        finally:
+            widget.close()
+
+    def test_current_range_selection_updates_editable_limit_to_105_percent(self):
+        window = MainWindow()
+        try:
+            pairs = (
+                (2, 'current_range', 'i_limit'),
+                (3, 'Bias_RANGE', 'Bias_I_LIMIT'),
+                (4, 'bias_range', 'bias_i_limit'),
+                (5, 'b_range', 'b_ilimit'),
+                (6, 'b_range', 'b_ilimit'),
+                (7, 'g_range', 'g_ilimit'),
+                (7, 'b_range', 'b_ilimit'),
+            )
+            for page, range_key, limit_key in pairs:
+                widget = window.stack.widget(page)
+                combo = widget.inputs[range_key]
+                index = combo.findData(1e-3)
+                self.assertGreaterEqual(index, 0)
+                combo.setCurrentIndex(index)
+                combo.activated.emit(index)
+                self.assertAlmostEqual(
+                    float(widget.inputs[limit_key].text()), 1.05e-3
+                )
+                widget.inputs[limit_key].setText('0.0009')
+                self.assertEqual(widget.inputs[limit_key].text(), '0.0009')
+        finally:
+            window.close()
+
     def test_bundled_configs_use_new_sampling_schema(self):
         config_dir = Path(__file__).resolve().parents[1] / 'configs'
+        expected_it_ranges = {
+            'default.json': 1e-6,
+            '5T.json': 1e-5,
+            '9T.json': 1e-6,
+        }
         for filename in ('default.json', '5T.json', '9T.json'):
             payload = json.loads((config_dir / filename).read_text(encoding='utf-8'))
             modules = payload['modules']
@@ -1682,13 +2023,37 @@ class UnifiedTimeSamplingTests(unittest.TestCase):
                                 'g_nplc_s', 'g_nplc_st', 'autozero_mode'):
                     self.assertNotIn(old_key, data)
             it_data = modules['it_step_setgate']
+            self.assertEqual(
+                float(it_data['b_range']), expected_it_ranges[filename]
+            )
+            self.assertAlmostEqual(
+                float(it_data['b_ilimit']),
+                expected_it_ranges[filename] * 1.05,
+            )
             self.assertTrue(it_data['custom_gate_text'].strip())
             self.assertTrue(it_data['custom_bias_text'].strip())
-            self.assertIn('g_ramp_step_c', it_data)
-            self.assertIn('b_ramp_step_c', it_data)
+            for key in (
+                'g_ramp_step', 'g_ilimit', 'g_settle',
+                'g_post_zero_wait', 'b_ramp_step', 'b_range',
+                'b_ilimit', 'b_settle', 'b_post_wait',
+            ):
+                self.assertIn(key, it_data)
+            for old_key in (
+                'g_ramp_step_s', 'g_ramp_step_st', 'g_ramp_step_c',
+                'b_ramp_step_s', 'b_ramp_step_st', 'b_ramp_step_c',
+                'g_step_delay_s', 'b_step_delay_s', 'meas_mode',
+                'line_filter_mode',
+            ):
+                self.assertNotIn(old_key, it_data)
+            self.assertTrue(it_data['__controls__']['rb_meas_points'])
             self.assertFalse(
                 it_data['__controls__']['rb_g_custom']
             )
+            if filename == '9T.json':
+                it_plot = payload['plotting']['modules']['it_step_setgate']
+                self.assertEqual(it_plot['title'], 'Current-Time Characteristics')
+                self.assertEqual(it_plot['width_mm'], 183.0)
+                self.assertEqual(it_plot['it_line_filter_mode'], 'off')
             self.assertFalse(
                 it_data['__controls__']['rb_b_custom']
             )
@@ -1738,15 +2103,15 @@ class UnifiedTimeSamplingTests(unittest.TestCase):
             collector.acquire_segment(0.1, 2000.0)
 
 
-class ConfigurationCompatibilityTests(unittest.TestCase):
-    def test_all_legacy_profiles_and_v2_wrapper_parse(self):
+class ConfigurationSchemaTests(unittest.TestCase):
+    def test_all_bundled_profiles_use_current_schema(self):
         config_dir = Path(__file__).resolve().parents[1] / 'configs'
         for name in ('default.json', '5T.json', '9T.json'):
             payload = json.loads(
                 (config_dir / name).read_text(encoding='utf-8')
             )
             version, modules = parse_config_modules(payload)
-            self.assertEqual(version, 2)
+            self.assertEqual(version, 3)
             self.assertIn('it_step_setgate', modules)
             controls = modules['it_step_setgate']['__controls__']
             self.assertTrue(controls['rb_b_single'])
@@ -1754,31 +2119,15 @@ class ConfigurationCompatibilityTests(unittest.TestCase):
             self.assertFalse(controls['rb_b_custom'])
             self.assertFalse(controls['rb_g_custom'])
 
-        version, modules = parse_config_modules({
-            '__schema_version__': 2,
-            'modules': {
-                'it_step_setgate': {
-                    '__controls__': {'cb_gate': True},
-                    '__folder__': 'results',
-                    '__waveform__': [[0.1, 1.0]],
-                }
-            },
-        })
-        self.assertEqual(version, 2)
-        self.assertTrue(
-            modules['it_step_setgate']['__controls__']['cb_gate']
-        )
-
-    def test_future_schema_is_rejected(self):
-        with self.assertRaises(ValueError):
-            parse_config_modules({'__schema_version__': 3, 'modules': {}})
-
-    def test_unversioned_legacy_profile_still_parses(self):
-        version, modules = parse_config_modules({
-            'iv_curve': {'v_start': '0', 'v_end': '1'}
-        })
-        self.assertEqual(version, 1)
-        self.assertIn('iv_curve', modules)
+    def test_noncurrent_schemas_are_rejected(self):
+        for payload in (
+            {'__schema_version__': 2, 'modules': {}},
+            {'__schema_version__': 4, 'modules': {}},
+            {'iv_curve': {'v_start': '0', 'v_end': '1'}},
+        ):
+            with self.subTest(payload=payload):
+                with self.assertRaises(ValueError):
+                    parse_config_modules(payload)
 
 
 class SaveQueueRaceTests(unittest.TestCase):

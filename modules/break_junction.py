@@ -6,7 +6,6 @@ import numpy as np
 import pyvisa
 
 from PyQt6.QtWidgets import (
-    QApplication,
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
@@ -17,7 +16,6 @@ from PyQt6.QtWidgets import (
     QGroupBox,
     QTextEdit,
     QScrollArea,
-    QFileDialog,
     QMessageBox,
     QSizePolicy,
 )
@@ -27,7 +25,7 @@ from PyQt6.QtGui import QFont
 import pyqtgraph as pg
 
 from core.app_base import BaseAppWidget
-from core.paths import default_data_directory
+from core.paths import DataRootSettings
 from core.hardware_base import (
     allocate_unique_path,
     atomic_text_writer,
@@ -47,7 +45,11 @@ from core.hardware_base import (
     write_result_metadata,
 )
 from core.instrument_config import InstrumentSettings
-from core.utils import G0, NoScrollComboBox, _0, _1, _2, _3, configure_pyqtgraph
+from core.ui_builder import (
+    configure_output_path, configure_parameter_grid, create_status_group,
+    style_parameter_control, style_parameter_label,
+)
+from core.utils import G0, NoScrollComboBox, _0, _1, _2, configure_pyqtgraph
 
 
 class BreakMeasurement:
@@ -145,9 +147,6 @@ class BreakMeasurement:
                 if self.stop_event.is_set() or self.force_stop_event.is_set():
                     return False
                 self.keithley.write(f':SOUR:VOLT {v}')
-                if self.preset['SETTLE_TIME'] > 0:
-                    if self._interruptible_sleep(self.preset['SETTLE_TIME']):
-                        return False
                 curr = required_float_query(
                     self.keithley, ':MEAS:CURR?', '断裂结爬坡电流读数'
                 )
@@ -184,7 +183,6 @@ class BreakMeasurement:
         cycle = 0
         v0 = self.preset['V0']
         v_max = self.preset['V_MAX']
-        settle_time = self.preset['SETTLE_TIME']
         g_aim = self.preset['G_AIM_G0']
 
         first = True
@@ -202,10 +200,6 @@ class BreakMeasurement:
 
             while v <= v_max and not self.stop_event.is_set() and not self.force_stop_event.is_set():
                 self.keithley.write(f':SOUR:VOLT {v}')
-                if settle_time > 0:
-                    if self._interruptible_sleep(settle_time):
-                        break
-
                 try:
                     i_val = required_float_query(
                         self.keithley, ':MEAS:CURR?', '断裂结正式电流读数'
@@ -306,7 +300,7 @@ class BreakMeasurement:
 
 
 class BreakJunctionWidget(BaseAppWidget):
-    def __init__(self, run_guard=None, instrument_settings=None, parent=None):
+    def __init__(self, run_guard=None, instrument_settings=None, data_settings=None, parent=None):
         configure_pyqtgraph(use_opengl=True)
         super().__init__(run_guard=run_guard, parent=parent)
 
@@ -315,6 +309,7 @@ class BreakJunctionWidget(BaseAppWidget):
         self.instrument_settings = instrument_settings or InstrumentSettings(
             bias_address='GPIB0::1::INSTR'
         )
+        self.data_settings = data_settings or DataRootSettings(parent=self)
 
         self.ui_font = QFont('Arial', 12)
         self.ui_font.setWeight(QFont.Weight.Normal)
@@ -378,15 +373,6 @@ class BreakJunctionWidget(BaseAppWidget):
         right_layout = QVBoxLayout()
         main_layout.addLayout(right_layout, stretch=2)
 
-        status_group = QGroupBox('实时状态显示')
-        status_group.setFont(self.bold_font)
-        status_group.setFixedHeight(135)
-        status_layout = QGridLayout(status_group)
-        status_layout.setColumnStretch(1, 1)
-        status_layout.setColumnStretch(3, 1)
-        status_layout.setHorizontalSpacing(10)
-
-        self.status_labels = {}
         status_items = [
             ('电压 (V):', 'V', 0, 0),
             ('电流 (A):', 'I', 1, 0),
@@ -397,17 +383,9 @@ class BreakJunctionWidget(BaseAppWidget):
             ('电流变化比例 (%):', 'change_ratio', 2, 2),
             ('系统状态:', 'stage', 3, 2),
         ]
-        for text, key, row, col in status_items:
-            lbl = QLabel(text)
-            lbl.setFont(self.ui_font)
-            status_layout.addWidget(
-                lbl, row, col, alignment=Qt.AlignmentFlag.AlignLeft)
-            val = QLabel('-')
-            val.setFont(self.bold_font)
-            val.setStyleSheet('color: #0055A4;')
-            status_layout.addWidget(
-                val, row, col + 1, alignment=Qt.AlignmentFlag.AlignLeft)
-            self.status_labels[key] = val
+        status_group, self.status_labels = create_status_group(
+            status_items, self.ui_font, self.bold_font
+        )
         right_layout.addWidget(status_group)
 
         param_group = QGroupBox('测量参数')
@@ -429,23 +407,23 @@ class BreakJunctionWidget(BaseAppWidget):
         preset_group = QGroupBox('预设参数 (启动后不可更改)')
         preset_group.setFont(self.bold_font)
         preset_grid = QGridLayout(preset_group)
+        configure_parameter_grid(preset_grid)
 
         preset_items = [
             ('起始电压 (V):', 'V0', '0.01'),
             ('最大电压 (V):', 'V_MAX', '10.0'),
             ('目标电导 (G₀):', 'G_AIM_G0', '0.05'),
             ('电流限制 (A):', 'CURRENT_LIMIT', '0.1'),
-            ('稳定时间 (s):', 'SETTLE_TIME', '0.0'),
-            ('NPLC:', 'NPLC', '0.01'),
+            ('测量 NPLC:', 'NPLC', '0.01'),
             ('归零步长 (V):', 'ZERO_STEP_V', '0.005'),
         ]
 
         r, col_idx = 0, 0
         for label, key, default in preset_items:
             lbl = QLabel(label)
-            lbl.setFont(self.ui_font)
+            style_parameter_label(lbl, self.ui_font)
             ent = QLineEdit(default)
-            ent.setFont(self.ui_font)
+            style_parameter_control(ent, self.ui_font)
             preset_grid.addWidget(lbl, r, col_idx * 2)
             preset_grid.addWidget(ent, r, col_idx * 2 + 1)
             self.preset_inputs[key] = ent
@@ -459,23 +437,29 @@ class BreakJunctionWidget(BaseAppWidget):
         control_group = QGroupBox('控制参数 (支持实时更改)')
         control_group.setFont(self.bold_font)
         control_grid = QGridLayout(control_group)
+        control_grid.setColumnMinimumWidth(0, 140)
+        control_grid.setColumnStretch(1, 1)
+        control_grid.setHorizontalSpacing(10)
+        control_grid.setVerticalSpacing(6)
 
         control_items = [
             ('步长 (mV):', 'step_mV', '0.100'),
-            ('步长增量 (mV/cycle):', 'speed_mV', '0.020'),
+            ('步长增量 (mV/轮):', 'speed_mV', '0.020'),
             ('最大步长 (mV):', 'max_step_mV', '40.000'),
             ('最小反馈电压 (V):', 'min_feedback_voltage', '0.050'),
-            ('电流变化比例阈值 (%):', 'delta_percent', '1.0'),
+            ('电流变化阈值 (%):', 'delta_percent', '1.0'),
         ]
         r = 0
         for label, key, default in control_items:
             lbl = QLabel(label)
-            lbl.setFont(self.ui_font)
+            style_parameter_label(lbl, self.ui_font)
             ent = QLineEdit(default)
-            ent.setFont(self.ui_font)
+            style_parameter_control(ent, self.ui_font)
             if key == 'step_mV':
                 lbl.setStyleSheet('color: #AA0000;')
-                ent.setStyleSheet('background-color: #FFF0F0;')
+                ent.setStyleSheet(
+                    'background-color: #FFF0F0; color: #8B0000;'
+                )
             control_grid.addWidget(lbl, r, 0)
             control_grid.addWidget(ent, r, 1)
             self.control_inputs[key] = ent
@@ -493,32 +477,16 @@ class BreakJunctionWidget(BaseAppWidget):
         path_group.setFont(self.bold_font)
         path_grid = QGridLayout(path_group)
 
-        lbl_filename = QLabel('文件名:')
-        lbl_filename.setFont(self.ui_font)
-        path_grid.addWidget(lbl_filename, 0, 0)
-
         ent_filename = QLineEdit('Break.txt')
         ent_filename.setFont(self.ui_font)
         self.preset_inputs['FILENAME'] = ent_filename
-        path_grid.addWidget(ent_filename, 0, 1)
-
-        lbl_folder = QLabel('保存文件夹:')
-        lbl_folder.setFont(self.ui_font)
-        path_grid.addWidget(lbl_folder, 1, 0, 1, 2)
-
-        folder_hbox = QHBoxLayout()
-        folder_hbox.setContentsMargins(0, 0, 0, 0)
-        self.folder_input = QLineEdit(default_data_directory("Break_Junction"))
+        self.folder_input = QLineEdit('Break')
         self.folder_input.setFont(self.ui_font)
-        folder_hbox.addWidget(self.folder_input)
-
-        btn_browse = QPushButton('浏览')
-        btn_browse.setFont(self.ui_font)
-        btn_browse.setFixedWidth(80)
-        btn_browse.clicked.connect(self.browse_folder)
-        folder_hbox.addWidget(btn_browse)
-
-        path_grid.addLayout(folder_hbox, 2, 0, 1, 2)
+        configure_output_path(
+            self, path_grid, self.folder_input, ent_filename,
+            self.data_settings, 'Break',
+            hint='',
+        )
         scroll_content_layout.addWidget(path_group)
 
         self.inputs.update(self.preset_inputs)
@@ -586,11 +554,6 @@ class BreakJunctionWidget(BaseAppWidget):
 
         right_layout.addWidget(btn_area)
 
-    def browse_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, '选择保存文件夹')
-        if folder:
-            self.folder_input.setText(folder)
-
     def log_info(self, msg):
         self.log_text.append(msg)
         self.log_text.verticalScrollBar().setValue(
@@ -646,8 +609,6 @@ class BreakJunctionWidget(BaseAppWidget):
                 raise ValueError('目标电导必须大于 0')
             if preset_params['CURRENT_LIMIT'] <= 0:
                 raise ValueError('电流限制必须大于 0')
-            if preset_params['SETTLE_TIME'] < 0:
-                raise ValueError('稳定时间不能为负值')
             if preset_params['NPLC'] <= 0:
                 raise ValueError('NPLC 必须大于 0')
             if preset_params['ZERO_STEP_V'] <= 0:
@@ -661,7 +622,7 @@ class BreakJunctionWidget(BaseAppWidget):
             self.mark_measurement_finished(self.module_id)
             return
 
-        folder = self.folder_input.text()
+        folder = self.resolved_output_folder()
         try:
             os.makedirs(folder, exist_ok=True)
             test_file = os.path.join(folder, '.write_test')
@@ -769,7 +730,7 @@ class BreakJunctionWidget(BaseAppWidget):
                 if self.data_count > 0:
                     self.submit_save(
                         self.save_data,
-                        self.folder_input.text().strip(),
+                        self.resolved_output_folder(),
                         self.preset_inputs['FILENAME'].text().strip()
                         or 'Break.txt',
                         self.v_data[:self.data_count].copy(),
