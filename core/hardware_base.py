@@ -5,7 +5,6 @@ import os
 import tempfile
 import time
 from pathlib import Path
-import pyvisa
 
 
 SUPPORTED_2450_CURRENT_RANGES = (
@@ -992,95 +991,3 @@ def write_result_metadata(
     with atomic_text_writer(metadata_path) as stream:
         json.dump(payload, stream, ensure_ascii=False, indent=2)
     return metadata_path
-
-
-class BaseMeasurement:
-    def __init__(self, stop_event, force_stop_event, update_queue=None, alarm_queue=None):
-        self.stop_event = stop_event
-        self.force_stop_event = force_stop_event
-        self.update_queue = update_queue
-        self.alarm_queue = alarm_queue
-
-    def connect_instrument(self, address, timeout_ms=5000):
-        try:
-            rm = pyvisa.ResourceManager()
-            inst = rm.open_resource(address)
-            inst.timeout = timeout_ms
-            idn = validate_2450_idn(inst.query('*IDN?'))
-            if self.alarm_queue is not None:
-                self.alarm_queue.put(f"仪器已连接: {idn}")
-            return inst
-        except Exception as exc:
-            if self.alarm_queue is not None:
-                self.alarm_queue.put(f"连接失败: {repr(exc)}")
-            raise
-
-    def _interruptible_sleep(self, duration_s, stage_msg=None, update_type='stage'):
-        if duration_s <= 0:
-            return True
-
-        steps = int(duration_s / 0.1)
-        for i in range(steps):
-            if self.stop_event.is_set() or self.force_stop_event.is_set():
-                return False
-            time.sleep(0.1)
-            if stage_msg and self.update_queue is not None and i % 10 == 0:
-                remain = duration_s - (i * 0.1)
-                self.update_queue.put((update_type, f"{stage_msg} ({remain:.1f}s)"))
-
-        remain = duration_s - steps * 0.1
-        if remain > 0:
-            time.sleep(remain)
-        return not (self.stop_event.is_set() or self.force_stop_event.is_set())
-
-    def _ramp_voltage(self, inst, target_v, step_abs, step_delay_s, is_gate=False, is_zeroing=False,
-                      read_query=':READ?', update_prefix=None):
-        try:
-            current_v = required_float_query(inst, ':SOUR:VOLT?', '源电压回读')
-        except MeasurementReadError:
-            raise
-
-        if abs(target_v - current_v) < 1e-9:
-            return True
-
-        step_abs = abs(step_abs)
-        if step_abs == 0:
-            step_abs = 0.001
-
-        direction = 1 if target_v > current_v else -1
-        steps = int(round(abs(target_v - current_v) / step_abs))
-        if steps == 0:
-            steps = 1
-
-        for i in range(1, steps + 1):
-            if self.force_stop_event.is_set():
-                return False
-            if not is_zeroing and self.stop_event.is_set():
-                return False
-
-            v = current_v + direction * i * step_abs
-            if direction == 1 and v > target_v:
-                v = target_v
-            elif direction == -1 and v < target_v:
-                v = target_v
-
-            inst.write(f':SOUR:VOLT {v}')
-            time.sleep(step_delay_s)
-
-            if self.update_queue is not None:
-                try:
-                    reading = required_float_query(inst, read_query, '爬坡电流读数')
-                except MeasurementReadError:
-                    raise
-
-                if update_prefix:
-                    self.update_queue.put((update_prefix, v, reading))
-                elif is_gate:
-                    self.update_queue.put(('ramp_g', v, reading))
-                else:
-                    self.update_queue.put(('ramp_b', v, reading))
-
-            if v == target_v:
-                break
-
-        return True

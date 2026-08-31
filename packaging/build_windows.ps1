@@ -148,6 +148,7 @@ try {
     Copy-Item -LiteralPath $builtExe -Destination $releaseStage
     Copy-Item -LiteralPath $builtRuntime -Destination $releaseStage -Recurse
     Copy-Item -LiteralPath (Join-Path $repoRoot "configs") -Destination $releaseStage -Recurse
+    Copy-Item -LiteralPath (Join-Path $repoRoot "docs") -Destination $releaseStage -Recurse
     Copy-Item -LiteralPath (Join-Path $repoRoot "Readme.md") -Destination $releaseStage
     Compress-ReleaseArchive $releaseStage $releaseZip
 

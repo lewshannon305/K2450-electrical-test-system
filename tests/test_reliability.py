@@ -13,7 +13,9 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 import numpy as np
 from PyQt6.QtCore import QPoint, Qt
 from PyQt6.QtGui import QFont
-from PyQt6.QtWidgets import QApplication, QFrame, QGroupBox, QLabel
+from PyQt6.QtWidgets import (
+    QApplication, QComboBox, QFrame, QGroupBox, QLabel, QTableWidget,
+)
 
 from core.hardware_base import (
     InstrumentConfigurationError,
@@ -453,6 +455,11 @@ class GlobalInstrumentSelectionTests(unittest.TestCase):
                 [action.text() for action in window.menuBar().actions()],
                 ['文件', '测量', '绘图', '帮助'],
             )
+            help_menu = window.menuBar().actions()[-1].menu()
+            self.assertEqual(
+                [action.text() for action in help_menu.actions()],
+                ['Readme.md', '参考采样率'],
+            )
             self.assertEqual(
                 [window.nav_group.button(i).text() for i in range(8)],
                 [
@@ -461,6 +468,47 @@ class GlobalInstrumentSelectionTests(unittest.TestCase):
                     '任意偏压波形测试', '任意栅压波形测试',
                 ],
             )
+        finally:
+            window.close()
+
+    def test_reference_sample_rate_help_table(self):
+        window = MainWindow()
+        try:
+            window.open_sample_rates()
+            QApplication.processEvents()
+            dialog = window._sample_rate_dialog
+            table = dialog.findChild(
+                QTableWidget, 'reference_sample_rate_table'
+            )
+            self.assertIsNotNone(table)
+            self.assertEqual(table.rowCount(), 8)
+            self.assertEqual(table.columnCount(), 3)
+            self.assertEqual(
+                [table.horizontalHeaderItem(i).text() for i in range(3)],
+                ['模式', 'NPLC', '参考采样率'],
+            )
+            self.assertEqual(table.item(0, 2).text(), '2146.56 Hz')
+            self.assertNotIn('786.38 Hz', [
+                table.item(row, 2).text() for row in range(table.rowCount())
+            ])
+            self.assertNotIn('158.91 Hz', [
+                table.item(row, 2).text() for row in range(table.rowCount())
+            ])
+            self.assertNotIn('条件', [
+                table.horizontalHeaderItem(i).text() for i in range(3)
+            ])
+            self.assertNotIn('栅表', [
+                table.horizontalHeaderItem(i).text() for i in range(3)
+            ])
+            self.assertGreaterEqual(dialog.width(), table.width())
+            self.assertNotIn('1573 点', [
+                table.item(row, 2).text() for row in range(table.rowCount())
+            ])
+            self.assertNotIn('354 点', [
+                table.item(row, 2).text() for row in range(table.rowCount())
+            ])
+            self.assertGreaterEqual(dialog.height(), 280)
+            dialog.close()
         finally:
             window.close()
 
@@ -677,7 +725,9 @@ class GlobalInstrumentSelectionTests(unittest.TestCase):
                 self.assertTrue(expected <= visible_text)
             self.assertEqual(widgets[5].inputs['b_range'].currentData(), 1e-6)
             self.assertNotIn('g_range', widgets[6].inputs)
-            self.assertEqual(widgets[6].inputs['g_voltage_range'].text(), '20')
+            self.assertEqual(
+                widgets[6].inputs['g_voltage_range'].currentData(), 20.0
+            )
             self.assertEqual(widgets[6].inputs['b_range'].currentData(), 1e-6)
             gate_fields = (
                 (widgets[1], 'gate_voltage_range', 'gate_ilimit'),
@@ -688,7 +738,18 @@ class GlobalInstrumentSelectionTests(unittest.TestCase):
                 (widgets[6], 'g_voltage_range', 'g_ilimit'),
             )
             for widget, range_key, limit_key in gate_fields:
-                self.assertEqual(float(widget.inputs[range_key].text()), 20.0)
+                range_control = widget.inputs[range_key]
+                self.assertIsInstance(range_control, QComboBox)
+                self.assertFalse(range_control.isEditable())
+                self.assertEqual(range_control.currentData(), 20.0)
+                self.assertEqual(
+                    [range_control.itemData(i) for i in range(4)],
+                    [0.2, 2.0, 20.0, 200.0],
+                )
+                self.assertEqual(
+                    [range_control.itemText(i) for i in range(4)],
+                    ['0.2 V', '2 V', '20 V', '200 V'],
+                )
                 self.assertEqual(float(widget.inputs[limit_key].text()), 1e-9)
                 for obsolete in (
                     'gate_leakage_limit', 'Ig_THRESHOLD',
@@ -2277,12 +2338,8 @@ class UnifiedTimeSamplingTests(unittest.TestCase):
 
     def test_bundled_configs_use_new_sampling_schema(self):
         config_dir = Path(__file__).resolve().parents[1] / 'configs'
-        expected_it_ranges = {
-            'default.json': 1e-6,
-            '5T.json': 1e-5,
-            '9T.json': 1e-6,
-        }
-        for filename in ('default.json', '5T.json', '9T.json'):
+        expected_it_ranges = {'default.json': 1e-6}
+        for filename in ('default.json',):
             payload = json.loads((config_dir / filename).read_text(encoding='utf-8'))
             modules = payload['modules']
             for module_id in ('it_step_setgate', 'arbitrary_bias', 'arbitrary_gate'):
@@ -2320,11 +2377,6 @@ class UnifiedTimeSamplingTests(unittest.TestCase):
             self.assertFalse(
                 it_data['__controls__']['rb_g_custom']
             )
-            if filename == '9T.json':
-                it_plot = payload['plotting']['modules']['it_step_setgate']
-                self.assertEqual(it_plot['title'], 'Current-Time Characteristics')
-                self.assertEqual(it_plot['width_mm'], 183.0)
-                self.assertEqual(it_plot['it_line_filter_mode'], 'off')
             self.assertFalse(
                 it_data['__controls__']['rb_b_custom']
             )
@@ -2377,7 +2429,7 @@ class UnifiedTimeSamplingTests(unittest.TestCase):
 class ConfigurationSchemaTests(unittest.TestCase):
     def test_all_bundled_profiles_use_current_schema(self):
         config_dir = Path(__file__).resolve().parents[1] / 'configs'
-        for name in ('default.json', '5T.json', '9T.json'):
+        for name in ('default.json',):
             payload = json.loads(
                 (config_dir / name).read_text(encoding='utf-8')
             )

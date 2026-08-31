@@ -30,10 +30,6 @@ def readme_path():
     return application_root() / "Readme.md"
 
 
-def default_data_directory(folder_name):
-    return str(Path(default_data_root()) / folder_name)
-
-
 def default_data_root():
     return str(Path("C:/Users/Public/Documents/K2450_Data"))
 

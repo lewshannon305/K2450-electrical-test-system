@@ -27,8 +27,12 @@ from PyQt6.QtWidgets import (
     QRadioButton,
     QGridLayout,
     QSizePolicy,
+    QAbstractItemView,
+    QHeaderView,
+    QTableWidget,
+    QTableWidgetItem,
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QUrl
 from PyQt6.QtGui import QFont, QFontMetrics, QIcon
 
 from core.paths import DataRootSettings, readme_path, resource_path
@@ -51,6 +55,18 @@ from core.plotting import (
     merge_plot_settings,
     select_preview_paths,
     render_result,
+)
+
+
+REFERENCE_SAMPLE_RATES = (
+    ('高速触发', '0.01', '2146.56 Hz'),
+    ('高速触发', '0.05', '786.59 Hz'),
+    ('高速触发', '0.10', '439.26 Hz'),
+    ('高速触发', '1.00', '49.35 Hz'),
+    ('实时采样', '0.01', '203.62 Hz'),
+    ('实时采样', '0.05', '170.18 Hz'),
+    ('实时采样', '0.10', '176.39 Hz'),
+    ('实时采样', '1.00', '41.05 Hz'),
 )
 
 
@@ -519,6 +535,8 @@ class MainWindow(QMainWindow):
         help_menu = menu_bar.addMenu("帮助")
         action_readme = help_menu.addAction("Readme.md")
         action_readme.triggered.connect(self.open_readme)
+        action_sample_rates = help_menu.addAction("参考采样率")
+        action_sample_rates.triggered.connect(self.open_sample_rates)
 
     def _build_ui(self):
         central = QWidget()
@@ -942,6 +960,9 @@ class MainWindow(QMainWindow):
                 </body>
                 </html>
                 """
+                browser.document().setBaseUrl(
+                    QUrl.fromLocalFile(str(md_file.parent.resolve()) + os.sep)
+                )
                 browser.setHtml(full_html)
             except Exception as e:
                 browser.setPlainText(f"无法渲染文件: {e}")
@@ -949,6 +970,48 @@ class MainWindow(QMainWindow):
             browser.setPlainText("未找到 Readme.md 文件。")
             
         layout.addWidget(browser)
+        dialog.show()
+
+    def open_sample_rates(self):
+        dialog = getattr(self, '_sample_rate_dialog', None)
+        if dialog is not None and dialog.isVisible():
+            dialog.raise_()
+            dialog.activateWindow()
+            return
+
+        dialog = QDialog(self)
+        self._sample_rate_dialog = dialog
+        dialog.setWindowTitle("参考采样率")
+        dialog.setMinimumSize(520, 280)
+        dialog.resize(560, 290)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+
+        table = QTableWidget(len(REFERENCE_SAMPLE_RATES), 3, dialog)
+        table.setObjectName('reference_sample_rate_table')
+        table.setHorizontalHeaderLabels(('模式', 'NPLC', '参考采样率'))
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        table.setAlternatingRowColors(True)
+        table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        table.setShowGrid(True)
+
+        for row, values in enumerate(REFERENCE_SAMPLE_RATES):
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                table.setItem(row, column, item)
+
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        table.verticalHeader().setDefaultSectionSize(28)
+        layout.addWidget(table)
+        dialog.finished.connect(
+            lambda _result: setattr(self, '_sample_rate_dialog', None)
+        )
         dialog.show()
 
     def _show_info(self, title, text):

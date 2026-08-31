@@ -53,7 +53,8 @@ from core.hardware_base import (
 from core.instrument_config import InstrumentSettings
 from core.ui_builder import (
     bind_range_to_limit, combo_config_value, configure_output_path,
-    configure_parameter_grid, create_current_range_combo, create_status_group,
+    configure_parameter_grid, create_current_range_combo,
+    create_voltage_range_combo, create_status_group,
     style_parameter_control, style_parameter_label,
 )
 from core.utils import G0, _0, _1, configure_pyqtgraph
@@ -760,7 +761,10 @@ class MappingWidget(BaseAppWidget):
             lbl = QLabel(label)
             style_parameter_label(lbl, self.ui_font)
             gate_grid.addWidget(lbl, r, c)
-            ent = QLineEdit(def_val)
+            ent = (
+                create_voltage_range_combo(def_val, self.ui_font)
+                if key == 'gate_v_range' else QLineEdit(def_val)
+            )
             style_parameter_control(ent, self.ui_font)
             self.inputs[key] = ent
             gate_grid.addWidget(ent, r, c + 1)

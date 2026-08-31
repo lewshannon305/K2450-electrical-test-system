@@ -44,7 +44,8 @@ from core.hardware_base import (
 from core.instrument_config import InstrumentSettings
 from core.ui_builder import (
     bind_range_to_limit, combo_config_value, configure_output_path,
-    configure_parameter_grid, create_current_range_combo, create_status_group,
+    configure_parameter_grid, create_current_range_combo,
+    create_voltage_range_combo, create_status_group,
     style_parameter_control, style_parameter_label, update_scroll_area_layout,
 )
 from core.time_acquisition import (
@@ -872,7 +873,10 @@ class ArbitraryBiasWidget(BaseAppWidget):
         def add_gp(r, c, txt, k, v):
             lb = QLabel(txt)
             style_parameter_label(lb, self.ui_font)
-            le = QLineEdit(v)
+            le = (
+                create_voltage_range_combo(v, self.ui_font)
+                if k == 'g_voltage_range' else QLineEdit(v)
+            )
             style_parameter_control(le, self.ui_font)
             gate_grid.addWidget(lb, r, c)
             gate_grid.addWidget(le, r, c+1)

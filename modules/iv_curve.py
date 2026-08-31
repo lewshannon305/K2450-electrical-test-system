@@ -67,7 +67,8 @@ from core.hardware_base import (
 from core.instrument_config import InstrumentSettings
 from core.ui_builder import (
     bind_range_to_limit, combo_config_value, configure_output_path,
-    configure_parameter_grid, create_current_range_combo, create_status_group,
+    configure_parameter_grid, create_current_range_combo,
+    create_voltage_range_combo, create_status_group, set_combo_config_value,
     style_parameter_control, style_parameter_label, update_scroll_area_layout,
 )
 from core.utils import G0, _0, _1, _2, _3
@@ -1244,7 +1245,10 @@ class IVWidget(BaseAppWidget):
         def add_gate_parameter(row, column, text, key, default):
             label = QLabel(text)
             style_parameter_label(label, self.ui_font)
-            control = QLineEdit(str(default))
+            control = (
+                create_voltage_range_combo(default, self.ui_font)
+                if key == 'gate_voltage_range' else QLineEdit(str(default))
+            )
             style_parameter_control(control, self.ui_font)
             gate_grid.addWidget(label, row, column)
             gate_grid.addWidget(control, row, column + 1)
@@ -1569,7 +1573,13 @@ class IVWidget(BaseAppWidget):
             'gate_ramp_step', 'gate_step_delay',
             'gate_settle', 'gate_group_wait',
         ):
-            settings[key] = float(self.inputs[key].text().strip())
+            control = self.inputs[key]
+            value = (
+                combo_config_value(control)
+                if isinstance(control, QComboBox)
+                else control.text().strip()
+            )
+            settings[key] = float(value)
         return settings
 
     def apply_gate_settings_to_main_controls(self):
@@ -1580,7 +1590,11 @@ class IVWidget(BaseAppWidget):
             'gate_ramp_step', 'gate_step_delay',
             'gate_settle', 'gate_group_wait',
         ):
-            self.inputs[key].setText(str(settings[key]))
+            control = self.inputs[key]
+            if isinstance(control, QComboBox):
+                set_combo_config_value(control, settings[key])
+            else:
+                control.setText(str(settings[key]))
 
     def toggle_gate_controls(self):
         def update_widgets():

@@ -322,24 +322,6 @@ class BaseAppWidget(QWidget):
             self.force_stop_event.set()
         self.stop_event.set()
 
-    @staticmethod
-    def require_positive(value, label):
-        if value <= 0:
-            raise ValueError(f"{label}必须大于 0，当前值: {value}")
-        return value
-
-    @staticmethod
-    def require_non_negative(value, label):
-        if value < 0:
-            raise ValueError(f"{label}不能为负值，当前值: {value}")
-        return value
-
-    @staticmethod
-    def require_positive_int(value, label):
-        if int(value) != value or value <= 0:
-            raise ValueError(f"{label}必须为正整数，当前值: {value}")
-        return int(value)
-
     def poll_queue(self):
         pass
 

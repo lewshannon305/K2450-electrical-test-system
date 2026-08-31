@@ -2,7 +2,7 @@ from pathlib import Path
 
 from PyQt6.QtWidgets import (
     QComboBox, QFileDialog, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
-    QLineEdit, QPushButton, QSizePolicy, QTextEdit, QVBoxLayout, QWidget,
+    QLineEdit, QPushButton, QSizePolicy, QWidget,
 )
 from PyQt6.QtCore import QCoreApplication, QEvent, QTimer, Qt
 from PyQt6.QtGui import QFontMetrics
@@ -12,6 +12,10 @@ CURRENT_RANGES = (
     ('10 nA', 10e-9), ('100 nA', 100e-9), ('1 µA', 1e-6),
     ('10 µA', 10e-6), ('100 µA', 100e-6), ('1 mA', 1e-3),
     ('10 mA', 10e-3), ('100 mA', 100e-3), ('1 A', 1.0),
+)
+
+VOLTAGE_RANGES = (
+    ('0.2 V', 0.2), ('2 V', 2.0), ('20 V', 20.0), ('200 V', 200.0),
 )
 
 PARAMETER_LABEL_WIDTH = 140
@@ -59,6 +63,19 @@ def create_current_range_combo(default='AUTO', include_auto=True, ui_font=None):
     index = combo.findData(
         'AUTO' if str(default).upper() == 'AUTO' else float(default)
     )
+    combo.setCurrentIndex(max(0, index))
+    return combo
+
+
+def create_voltage_range_combo(default=20.0, ui_font=None):
+    """Create a fixed Keithley 2450 source-voltage range selector."""
+    combo = QComboBox()
+    combo.setProperty('config_uses_data', True)
+    for label, value in VOLTAGE_RANGES:
+        combo.addItem(label, value)
+    if ui_font is not None:
+        combo.setFont(ui_font)
+    index = combo.findData(float(default))
     combo.setCurrentIndex(max(0, index))
     return combo
 
@@ -292,62 +309,3 @@ def configure_output_path(
     combined.editingFinished.connect(refresh_from_parts)
     browse.clicked.connect(browse_folder)
     refresh_from_parts()
-
-
-def create_log_group(title, ui_font, bold_font, on_clear=None):
-    log_group = QGroupBox(title)
-    log_group.setFont(bold_font)
-
-    log_layout = QVBoxLayout(log_group)
-    log_layout.setContentsMargins(5, 5, 5, 5)
-
-    log_text = QTextEdit()
-    log_text.setReadOnly(True)
-    log_text.setFont(ui_font)
-    log_text.setStyleSheet("background-color: #FFF0F0; color: #333333;")
-    log_text.setFixedHeight(60)
-    log_layout.addWidget(log_text)
-
-    btn_clear_log = QPushButton("清除信息")
-    btn_clear_log.setFont(bold_font)
-    btn_clear_log.setFixedWidth(100)
-    btn_clear_log.setFixedHeight(30)
-    if on_clear is not None:
-        btn_clear_log.clicked.connect(on_clear)
-    log_layout.addWidget(btn_clear_log, alignment=Qt.AlignmentFlag.AlignCenter)
-
-    return log_group, log_text, btn_clear_log
-
-
-def create_bottom_buttons(bold_font, on_start=None, on_stop=None, on_force=None):
-    btn_widget = QWidget()
-    btn_layout = QHBoxLayout(btn_widget)
-    btn_layout.setContentsMargins(0, 10, 0, 10)
-
-    start_btn = QPushButton("开始")
-    start_btn.setFixedSize(100, 30)
-    start_btn.setFont(bold_font)
-    if on_start is not None:
-        start_btn.clicked.connect(on_start)
-
-    stop_btn = QPushButton("停止")
-    stop_btn.setFixedSize(100, 30)
-    stop_btn.setFont(bold_font)
-    stop_btn.setEnabled(False)
-    if on_stop is not None:
-        stop_btn.clicked.connect(on_stop)
-
-    force_stop_btn = QPushButton("强制终止")
-    force_stop_btn.setFixedSize(100, 30)
-    force_stop_btn.setFont(bold_font)
-    force_stop_btn.setStyleSheet("color: #AA0000;")
-    if on_force is not None:
-        force_stop_btn.clicked.connect(on_force)
-
-    btn_layout.addWidget(start_btn)
-    btn_layout.addStretch()
-    btn_layout.addWidget(stop_btn)
-    btn_layout.addStretch()
-    btn_layout.addWidget(force_stop_btn)
-
-    return btn_widget, start_btn, stop_btn, force_stop_btn

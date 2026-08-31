@@ -66,7 +66,8 @@ from core.hardware_base import (
 from core.instrument_config import InstrumentSettings
 from core.ui_builder import (
     bind_range_to_limit, combo_config_value, configure_output_path,
-    configure_parameter_grid, create_current_range_combo, create_status_group,
+    configure_parameter_grid, create_current_range_combo,
+    create_voltage_range_combo, create_status_group,
     style_parameter_control, style_parameter_label, update_scroll_area_layout,
 )
 from core.time_acquisition import (
@@ -1404,7 +1405,10 @@ class ItStepWidget(BaseAppWidget):
             configure_parameter_grid(grid)
             lbl = QLabel(label)
             style_parameter_label(lbl, self.ui_font)
-            ent = QLineEdit(default)
+            ent = (
+                create_voltage_range_combo(default, self.ui_font)
+                if key == 'g_voltage_range' else QLineEdit(default)
+            )
             style_parameter_control(ent, self.ui_font)
             grid.addWidget(lbl, row, col)
             grid.addWidget(ent, row, col + 1)
