@@ -332,7 +332,10 @@ class PlotRenderingTests(unittest.TestCase):
                 {'.svg', '.pdf', '.png'},
             )
             self.assertTrue(all(
-                Path(path).parent == root / 'figures' / 'Break'
+                os.path.samefile(
+                    Path(path).parent,
+                    root / 'figures' / 'Break',
+                )
                 for path in paths
             ))
             self.assertEqual({Path(path).stem for path in paths}, {'break'})
@@ -382,8 +385,10 @@ class PlotRenderingTests(unittest.TestCase):
             first = render_result(result, settings)
             second = render_result(result, settings)
             expected = custom / 'IV' / 'IV.svg'
-            self.assertEqual(first, [str(expected)])
-            self.assertEqual(second, [str(expected)])
+            self.assertEqual(len(first), 1)
+            self.assertEqual(len(second), 1)
+            self.assertTrue(os.path.samefile(first[0], expected))
+            self.assertTrue(os.path.samefile(second[0], expected))
             self.assertTrue(expected.exists())
             self.assertFalse((custom / 'IV' / 'IV_backup001.svg').exists())
 
@@ -415,11 +420,10 @@ class PlotRenderingTests(unittest.TestCase):
                 'data_root': str(root),
                 'save_prefix': 'isdvg_accept',
             }, settings)
-            self.assertEqual(
-                outputs,
-                [str(root / 'figures' / 'Isd_Vg'
-                     / 'isdvg_accept_backup001.svg')],
-            )
+            expected = (root / 'figures' / 'Isd_Vg'
+                        / 'isdvg_accept_backup001.svg')
+            self.assertEqual(len(outputs), 1)
+            self.assertTrue(os.path.samefile(outputs[0], expected))
 
     def test_it_result_renders_every_data_file(self):
         with tempfile.TemporaryDirectory() as folder:
