@@ -102,14 +102,18 @@ try {
     if (-not (Test-Path -LiteralPath $builtRuntime -PathType Container)) {
         throw "The packaged runtime directory was not found."
     }
-    $archiveListing = & $Python -m PyInstaller.utils.cliutils.archive_viewer `
-        -r -b $builtExe 2>&1
+    $analysisManifest = Get-ChildItem -LiteralPath $workRoot `
+        -Filter "Analysis-00.toc" -Recurse -File | Select-Object -First 1
+    if (-not $analysisManifest) {
+        throw "The PyInstaller analysis manifest was not found."
+    }
+    $analysisListing = Get-Content -LiteralPath $analysisManifest.FullName -Raw
     foreach ($backend in @(
         "matplotlib.backends.backend_svg",
         "matplotlib.backends.backend_pdf",
         "matplotlib.backends.backend_agg"
     )) {
-        if (-not ($archiveListing -match [regex]::Escape($backend))) {
+        if (-not ($analysisListing -match [regex]::Escape($backend))) {
             throw "The packaged executable is missing $backend."
         }
     }
