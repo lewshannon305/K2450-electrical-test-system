@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+from pathlib import Path
 
 import json
 import markdown
@@ -49,6 +50,7 @@ from core.plotting import (
     load_default_plot_settings,
     merge_plot_settings,
     select_preview_paths,
+    render_result,
 )
 
 
@@ -60,7 +62,7 @@ def parse_config_modules(config_data):
         schema_version = int(schema_version)
     except (TypeError, ValueError) as exc:
         raise ValueError(f'无效配置版本: {schema_version}') from exc
-    if schema_version != 3:
+    if schema_version != 4:
         raise ValueError(f'不支持的配置版本: {schema_version}')
     modules = config_data.get('modules', {})
     if not isinstance(modules, dict):
@@ -150,7 +152,7 @@ class WelcomePage(QWidget):
             "<p style='margin: 10px 0; font-size: 12pt;'><b>1. 硬件连接：</b>请确保 Keithley 源表已通过 GPIB 妥善连接。</p>"
             "<p style='margin: 10px 0; font-size: 12pt;'><b>2. 初始化：</b>请先在首页点击“扫描设备”，选择并检测仪器连接。</p>"
             "<p style='margin: 10px 0; font-size: 12pt;'><b>3. 参数保存：</b>点击“文件 -> 保存/加载配置”，可一键备份并恢复所有 7 个模块的测试参数。</p>"
-            "<p style='margin: 10px 0; font-size: 12pt;'><b>4. 扫描顺序：</b>所有模块的步长均强制要求为正，扫描方向由起始终止电压的大小关系自动确定。</p>"
+            "<p style='margin: 10px 0; font-size: 12pt;'><b>4. 扫描顺序：</b>所有模块的步长均强制要求为正，扫描方向由起止电压的大小关系自动确定。</p>"
             "<p style='margin: 10px 0; font-size: 12pt;'><b>5. 极限性能警告：</b>高频采样时，请尽量避免后台高负载任务。</p>"
             "<p style='margin: 10px 0; font-size: 12pt;'><b>6. 紧急制动：</b>若测试遇险，请立即点击各界面右下角红色“强制终止”按钮。</p>"
         )
@@ -685,7 +687,7 @@ class MainWindow(QMainWindow):
                 return
 
             config_data = {
-                '__schema_version__': 3,
+                '__schema_version__': 4,
                 'instruments': self.instrument_settings.to_config(),
                 'storage': {'root': self.data_settings.root},
                 'modules': {},
@@ -1043,7 +1045,37 @@ class MainWindow(QMainWindow):
             self.show_latest_plots(paths, result.get('module_id'))
 
 
+def run_packaged_plot_smoke(output_directory):
+    root = Path(output_directory).resolve()
+    data_folder = root / 'Break'
+    data_folder.mkdir(parents=True, exist_ok=True)
+    data_path = data_folder / 'packaged_plot_smoke.txt'
+    data_path.write_text(
+        '# Voltage (V)\tCurrent (A)\tConductance (G0)\n'
+        '0.01\t1e-8\t0.001\n0.02\t2e-8\t0.002\n',
+        encoding='utf-8',
+    )
+    settings = default_plot_settings()
+    settings['modules']['break_junction']['formats'] = ['svg', 'pdf', 'png']
+    outputs = render_result({
+        'module_id': 'break_junction',
+        'status': 'complete',
+        'data_files': [str(data_path)],
+        'data_root': str(root),
+        'save_prefix': 'packaged_plot_smoke',
+    }, settings)
+    expected = {'.svg', '.pdf', '.png'}
+    actual = {Path(path).suffix.lower() for path in outputs if Path(path).exists()}
+    if actual != expected:
+        raise RuntimeError(
+            f'打包绘图格式不完整: 期望 {sorted(expected)}, 实际 {sorted(actual)}'
+        )
+
+
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == '--plot-smoke-test':
+        run_packaged_plot_smoke(sys.argv[2])
+        return 0
     if sys.platform == 'win32':
         # Give source launches their own taskbar identity instead of inheriting
         # the generic python.exe/pythonw.exe icon and taskbar group.
@@ -1055,8 +1087,8 @@ def main():
     app.setWindowIcon(QIcon(str(resource_path('assets', 'app_icon.ico'))))
     window = MainWindow()
     window.showMaximized()
-    sys.exit(app.exec())
+    return app.exec()
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

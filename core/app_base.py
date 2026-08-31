@@ -5,6 +5,7 @@ import queue
 import threading
 import time
 import uuid
+from pathlib import Path
 
 from core.hardware_base import result_metadata_path
 
@@ -33,6 +34,9 @@ class BaseAppWidget(QWidget):
         self._run_started_at = None
         self._result_records = []
         self._result_emitted = False
+        self._result_data_root = None
+        self._result_save_prefix = None
+        self._result_logical_path = None
         self._display_result_status = 'complete'
         self._display_result_error = None
         self._safety_alarm_active = False
@@ -59,11 +63,23 @@ class BaseAppWidget(QWidget):
         return False
 
     def _begin_result_run(self):
+        data_settings = getattr(self, 'data_settings', None)
+        combined_input = getattr(self, 'combined_output_input', None)
+        logical_path = (
+            combined_input.text().strip() if combined_input is not None else ''
+        )
         with self._save_lock:
             self._run_id = uuid.uuid4().hex[:12]
             self._run_started_at = time.time()
             self._result_records = []
             self._result_emitted = False
+            self._result_data_root = (
+                str(data_settings.root) if data_settings is not None else None
+            )
+            self._result_logical_path = logical_path or None
+            self._result_save_prefix = (
+                Path(logical_path).stem if logical_path else None
+            )
             self._display_result_status = 'complete'
             self._display_result_error = None
 
@@ -212,6 +228,9 @@ class BaseAppWidget(QWidget):
             'data_files': data_files,
             'metadata_files': metadata_files,
             'errors': errors,
+            'data_root': self._result_data_root,
+            'save_prefix': self._result_save_prefix,
+            'logical_path': self._result_logical_path,
         })
 
     def submit_save(self, function, *args, **kwargs):

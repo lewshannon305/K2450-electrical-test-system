@@ -33,6 +33,7 @@ from core.hardware_base import (
     configure_current_autozero,
     fast_shutdown_zero_2450,
     reliable_output_off,
+    shutdown_report_confirmed,
     required_float_query,
     validate_2450_idn,
     validate_current_range_limit,
@@ -156,22 +157,25 @@ class BreakMeasurement:
     def safe_ramp_to_zero(self):
         if self.keithley is None:
             return
-        if self.force_stop_event.is_set():
-            self.update_queue.put(('stage', '强制断电'))
-            reliable_output_off(self.keithley, '断裂结源表')
-            return
-        self.update_queue.put(('stage', '安全归零中...'))
+        forced = self.force_stop_event.is_set()
+        self.update_queue.put((
+            'stage', '强制断电' if forced else '安全归零中...'
+        ))
         report = fast_shutdown_zero_2450(
             self.keithley,
             self.preset['ZERO_STEP_V'],
             label='断裂结源表',
             force_event=self.force_stop_event,
         )
-        if report['status'] == 'complete':
-            self.alarm_queue.put(
-                f"归零完成，用时 {report['elapsed_s']:.1f} s"
+        if shutdown_report_confirmed(report):
+            message = (
+                '强制终止：已紧急归零并关闭输出'
+                if report['status'] == 'emergency_off'
+                else f"归零完成，用时 {report['elapsed_s']:.1f} s"
             )
+            self.alarm_queue.put(message)
             self.alarm_queue.put('输出已关闭')
+            self.update_queue.put(('ramp', 0.0, 0.0))
         else:
             self.alarm_queue.put(
                 '安全归零失败，已执行紧急关断：'
@@ -412,7 +416,7 @@ class BreakJunctionWidget(BaseAppWidget):
         preset_items = [
             ('起始电压 (V):', 'V0', '0.01'),
             ('最大电压 (V):', 'V_MAX', '10.0'),
-            ('目标电导 (G₀):', 'G_AIM_G0', '0.05'),
+            ('目标电导 (G₀):', 'G_AIM_G0', '0.025'),
             ('电流限制 (A):', 'CURRENT_LIMIT', '0.1'),
             ('测量 NPLC:', 'NPLC', '0.01'),
             ('归零步长 (V):', 'ZERO_STEP_V', '0.005'),

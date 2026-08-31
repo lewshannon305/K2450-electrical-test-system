@@ -30,6 +30,9 @@ from core.hardware_base import (
     allocate_unique_path,
     atomic_text_writer,
     clear_scpi_status,
+    check_gate_current_limit,
+    configure_gate_meter,
+    gate_safety_metadata,
     configure_current_autozero,
     fast_shutdown_zero_2450,
     reliable_output_off,
@@ -43,7 +46,7 @@ from core.hardware_base import (
     validate_source_voltage,
     validate_terminal,
     validate_voltage_range,
-    validate_voltage_within_range,
+    validate_gate_voltage_within_range,
     verify_current_configuration,
     write_result_metadata,
 )
@@ -77,6 +80,15 @@ class MappingMeasurement:
         self.active_vg = None
         self.active_records = []
         self.saved_paths = []
+        self.gate_limit_tripped = False
+
+    def _gate_metadata(self):
+        return gate_safety_metadata(
+            self.preset['gate_v_range'],
+            self.preset['gate_i_limit'],
+            True,
+            self.gate_limit_tripped,
+        )
 
     def _interruptible_sleep(self, duration):
         if duration <= 0:
@@ -138,7 +150,7 @@ class MappingMeasurement:
                 self.preset['vg_stop'],
                 self.preset['vg_step'],
             ):
-                validate_voltage_within_range(
+                validate_gate_voltage_within_range(
                     voltage,
                     self.preset['gate_v_range'],
                     'Mapping栅压点',
@@ -146,9 +158,7 @@ class MappingMeasurement:
             validate_current_range_limit(
                 self.preset['bias_range'], self.preset['bias_i_limit'], '偏压'
             )
-            validate_current_range_limit(
-                'AUTO', self.preset['gate_i_limit'], '栅极'
-            )
+            check_gate_current_limit(0.0, self.preset['gate_i_limit'])
             self.smu_b.write('*RST')
             clear_scpi_status(self.smu_b)
             self.smu_b.write(f":ROUT:TERM {self.preset['bias_term']}")
@@ -165,17 +175,14 @@ class MappingMeasurement:
             self.smu_b.write(f":SENS:CURR:NPLC {self.preset['bias_nplc']}")
             configure_current_autozero(self.smu_b, 'continuous')
 
-            self.smu_g.write('*RST')
-            clear_scpi_status(self.smu_g)
-            self.smu_g.write(f":ROUT:TERM {self.preset['gate_term']}")
-            self.smu_g.write(':SOUR:FUNC VOLT')
-            self.smu_g.write(':SOUR:VOLT 0')
-            self.smu_g.write(f":SOUR:VOLT:RANG {self.preset['gate_v_range']}")
-            self.smu_g.write(f":SOUR:VOLT:ILIM {self.preset['gate_i_limit']}")
-            self.smu_g.write(':SENS:FUNC "CURR"')
-            self.smu_g.write(':SENS:CURR:NPLC 1')
-            self.smu_g.write(':SENS:CURR:RANG:AUTO ON')
-            configure_current_autozero(self.smu_g, 'continuous')
+            configure_gate_meter(
+                self.smu_g,
+                voltage_range=self.preset['gate_v_range'],
+                current_limit=self.preset['gate_i_limit'],
+                nplc=1,
+                terminal=self.preset['gate_term'],
+                label='Mapping栅压表',
+            )
             verify_current_configuration(
                 self.smu_b,
                 nplc=self.preset['bias_nplc'],
@@ -184,15 +191,6 @@ class MappingMeasurement:
                 terminal=self.preset['bias_term'],
                 autozero_mode='continuous',
                 label='Mapping偏压表',
-            )
-            verify_current_configuration(
-                self.smu_g,
-                nplc=1,
-                current_range='AUTO',
-                current_limit=self.preset['gate_i_limit'],
-                terminal=self.preset['gate_term'],
-                autozero_mode='continuous',
-                label='Mapping栅压表',
             )
         except Exception as exc:
             self.alarm_queue.put(f"仪器初始化错误: {exc}")
@@ -214,10 +212,10 @@ class MappingMeasurement:
                     ig = self._safe_float_query(self.smu_g, ':MEAS:CURR?')
                 self.latest_ig = ig
                 self.latest_ig_time = time.monotonic()
-                if (
-                    self.preset['ig_threshold'] > 0
-                    and abs(ig) > self.preset['ig_threshold']
-                ):
+                try:
+                    check_gate_current_limit(ig, self.preset['gate_i_limit'])
+                except Exception:
+                    self.gate_limit_tripped = True
                     self.alarm_queue.put(f"漏电保护触发！Ig = {ig:.2e} A")
                     self.stop_event.set()
                     break
@@ -278,6 +276,7 @@ class MappingMeasurement:
             status='partial',
             point_count=len(self.active_records),
             error=error,
+            extra=self._gate_metadata(),
         )
         self.saved_paths.append(str(path))
         self.alarm_queue.put(f'Mapping部分数据已保存: {path}')
@@ -470,7 +469,8 @@ class MappingMeasurement:
                         file_obj.write(
                             f"{vg:.6f}\t{vb_up[i]:.6f}\t{ib_up[i]:.6e}\t{ig_up[i]:.6e}\t{ig_age_up[i]:.6f}\n")
                 write_result_metadata(
-                    fname, status='complete', point_count=len(vb_up)
+                    fname, status='complete', point_count=len(vb_up),
+                    extra=self._gate_metadata(),
                 )
                 self.saved_paths.append(str(fname))
                 self.active_records = []
@@ -532,7 +532,8 @@ class MappingMeasurement:
                         file_obj.write(
                             f"{vg:.6f}\t{vb_full[i]:.6f}\t{ib_full[i]:.6e}\t{ig_full[i]:.6e}\t{ig_age_full[i]:.6f}\n")
                 write_result_metadata(
-                    fname, status='complete', point_count=len(vb_full)
+                    fname, status='complete', point_count=len(vb_full),
+                    extra=self._gate_metadata(),
                 )
                 self.saved_paths.append(str(fname))
                 self.active_records = []
@@ -579,13 +580,18 @@ class MappingMeasurement:
             self.connect()
             self.setup()
             self.measure_loop()
-            if self.stop_event.is_set() or self.force_stop_event.is_set():
+            if self.gate_limit_tripped:
+                result_status = 'partial'
+                result_error = '栅电流保护触发'
+            elif self.stop_event.is_set() or self.force_stop_event.is_set():
                 result_status = 'partial'
                 result_error = '用户停止或强制终止'
             if self.active_records:
                 result_status = 'partial'
                 result_error = (
-                    '用户停止或强制终止'
+                    '栅电流保护触发'
+                    if self.gate_limit_tripped
+                    else '用户停止或强制终止'
                     if self.stop_event.is_set() or self.force_stop_event.is_set()
                     else '扫描未完整结束'
                 )
@@ -746,8 +752,7 @@ class MappingWidget(BaseAppWidget):
         gate_items = [
             ('起始电压 (V):', 'vg_start', '-5.0'), ('终止电压 (V):', 'vg_stop', '5.0'),
             ('扫描步长 (V):', 'vg_step', '0.05'), ('电压量程 (V):', 'gate_v_range', '20'),
-            ('电流限制 (A):', 'gate_i_limit',
-             '1e-9'), ('电流保护阈值 (A):', 'ig_threshold', '1e-9'),
+            ('电流限制 (A):', 'gate_i_limit', '1e-9'),
         ]
         for i, (label, key, def_val) in enumerate(gate_items):
             r = i % 3
@@ -924,8 +929,7 @@ class MappingWidget(BaseAppWidget):
                 raise ValueError('栅压量程必须大于 0')
             if preset['gate_i_limit'] <= 0:
                 raise ValueError('栅极限流必须大于 0')
-            if preset['ig_threshold'] < 0:
-                raise ValueError('栅极报警阈值不能为负值')
+            check_gate_current_limit(0.0, preset['gate_i_limit'])
             if preset['bias_max'] <= preset['bias_min']:
                 raise ValueError('偏压最大值必须大于偏压最小值')
             if preset['bias_step_full'] <= 0:

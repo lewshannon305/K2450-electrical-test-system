@@ -1,5 +1,5 @@
 {
-  "__schema_version__": 3,
+  "__schema_version__": 4,
   "instruments": {
     "bias": {
       "address": "GPIB0::1::INSTR",
@@ -14,7 +14,7 @@
     "break_junction": {
       "V0": "0.01",
       "V_MAX": "10.0",
-      "G_AIM_G0": "0.05",
+      "G_AIM_G0": "0.025",
       "CURRENT_LIMIT": "0.1",
       "NPLC": "0.01",
       "ZERO_STEP_V": "0.0005",
@@ -28,11 +28,11 @@
       "__output_path__": "Break/Break.txt"
     },
     "iv_curve": {
-      "v_start": "-1.0",
+      "v_start": "0.02",
       "nplc": "1.0",
-      "v_end": "1.0",
+      "v_end": "-0.02",
       "current_range": "1e-6",
-      "v_step": "0.02",
+      "v_step": "0.001",
       "cycles": "1",
       "i_limit": "1.05e-6",
       "mode": "single",
@@ -41,7 +41,6 @@
       "gate_voltage_range": "20.0",
       "gate_nplc": "1.0",
       "gate_ilimit": "1e-09",
-      "gate_leakage_limit": "1e-09",
       "gate_ramp_step": "0.1",
       "gate_step_delay": "0.5",
       "gate_settle": "20.0",
@@ -59,7 +58,6 @@
         "gate_voltage_range": 20.0,
         "gate_nplc": 1.0,
         "gate_ilimit": 1E-09,
-        "gate_leakage_limit": 1E-09,
         "gate_ramp_step": 0.1,
         "gate_step_delay": 0.5,
         "gate_settle": 20.0,
@@ -79,7 +77,7 @@
       "Vg_2nd": "-5.0",
       "Vg_step": "0.05",
       "Gate_VOLT_RANGE": "20.0",
-      "Ig_THRESHOLD": "1e-9",
+      "Gate_I_LIMIT": "1e-9",
       "SETTLE_TIME": "0.1",
       "__subfolder__": "Isd_Vg",
       "__output_path__": "Isd_Vg/Isd_Vg"
@@ -90,7 +88,6 @@
       "vg_step": "0.05",
       "gate_v_range": "20",
       "gate_i_limit": "1e-9",
-      "ig_threshold": "1e-9",
       "bias_max": "0.02",
       "bias_min": "-0.02",
       "bias_step_full": "0.0001",
@@ -138,6 +135,7 @@
       },
       "__subfolder__": "It",
       "g_ramp_step": "0.1",
+      "g_voltage_range": "20",
       "g_ilimit": "1e-9",
       "g_settle": "20.0",
       "g_post_zero_wait": "2.0",
@@ -156,10 +154,11 @@
       "switch_settle": "0.0",
       "b_ramp_step": "0.001",
       "b_range": 1E-06,
-      "b_ilimit": "0.1",
+      "b_ilimit": "1.05e-6",
       "plot_interval": "50",
       "g_target": "0.0",
       "g_ramp_step": "0.1",
+      "g_voltage_range": "20",
       "g_step_delay": "0.5",
       "g_settle": "2.0",
       "g_ilimit": "1e-9",
@@ -196,7 +195,7 @@
       "cycles": "1",
       "switch_settle": "0.0",
       "g_ramp_step": "0.05",
-      "g_range": 1E-06,
+      "g_voltage_range": 20,
       "g_ilimit": "1e-9",
       "plot_interval": "50",
       "b_target": "0.1",
@@ -204,7 +203,7 @@
       "b_step_delay": "0.01",
       "b_settle": "2.0",
       "b_range": 1E-06,
-      "b_ilimit": "0.1",
+      "b_ilimit": "1.05e-6",
       "filename": "arb_gate_test.txt",
       "__waveform__": [
         [

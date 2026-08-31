@@ -216,11 +216,15 @@ class InternalSegmentCollector:
 class RealtimeSampler:
     """Serial primary-current sampling with optional low-rate gate monitoring."""
 
-    def __init__(self, primary, gate, monitor_interval_s, on_gate_current=None):
+    def __init__(
+        self, primary, gate, monitor_interval_s, on_gate_current=None,
+        gate_current_limit=None,
+    ):
         self.primary = primary
         self.gate = gate
         self.monitor_interval_s = float(monitor_interval_s)
         self.on_gate_current = on_gate_current
+        self.gate_current_limit = gate_current_limit
         self.origin = time.perf_counter()
         self.next_monitor = self.origin
 
@@ -235,6 +239,9 @@ class RealtimeSampler:
             )
             if self.on_gate_current is not None:
                 self.on_gate_current(gate_current)
+            if self.gate_current_limit is not None:
+                from core.hardware_base import check_gate_current_limit
+                check_gate_current_limit(gate_current, self.gate_current_limit)
             self.next_monitor = now + self.monitor_interval_s
         return (t0 + t1) / 2.0 - self.origin, current
 

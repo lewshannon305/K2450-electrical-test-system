@@ -220,7 +220,7 @@ def configure_output_path(
     hint_label.setStyleSheet('font-weight: normal; color: #666666;')
     hint_label.setWordWrap(True)
     owner.output_hint_label = hint_label
-    label = QLabel('保存路径（根目录下）：')
+    label = QLabel('保存路径 (根目录下)：')
     label.setFont(normal_font)
     label.setStyleSheet('font-weight: normal;')
     combined = QLineEdit()

@@ -39,9 +39,12 @@ from core.hardware_base import (
     assert_no_scpi_errors,
     atomic_text_writer,
     clear_scpi_status,
+    check_gate_current_limit,
+    configure_gate_meter,
     configure_current_autozero,
     fast_shutdown_zero_2450,
     reliable_output_off,
+    shutdown_report_confirmed,
     release_path_reservation,
     required_float_query,
     validate_2450_idn,
@@ -53,8 +56,12 @@ from core.hardware_base import (
     validate_source_voltage,
     validate_step_divides_interval,
     validate_terminal,
+    validate_voltage_range,
+    validate_gate_voltage_within_range,
     verify_current_configuration,
     write_result_metadata,
+    GATE_CURRENT_RANGE_A,
+    GateCurrentLimitError,
 )
 from core.instrument_config import InstrumentSettings
 from core.ui_builder import (
@@ -560,7 +567,22 @@ class ItMeasurement:
                         validate_source_voltage(
                             target, f'自定义栅压第{index}项'
                         )
-                validate_current_range_limit('AUTO', self.params['g_ilimit'], '栅极')
+                check_gate_current_limit(0.0, self.params['g_ilimit'])
+                validate_voltage_range(
+                    self.params['g_voltage_range'], '栅压量程'
+                )
+                gate_values = (
+                    [self.params['g_target']]
+                    if self.params['g_mode'] == 'single'
+                    else [self.params['g_start'], self.params['g_end']]
+                    if self.params['g_mode'] == 'step'
+                    else self.params['g_targets']
+                )
+                for index, value in enumerate(gate_values, 1):
+                    validate_gate_voltage_within_range(
+                        value, self.params['g_voltage_range'],
+                        f'第{index}个栅压目标',
+                    )
             validate_program_step_plan('it', self.params)
             k_b = self.bias_keithley
             k_b.write('*RST')
@@ -587,20 +609,15 @@ class ItMeasurement:
 
             if self.params['gate_enabled']:
                 k_g = self.gate_keithley
-                k_g.write('*RST')
-                clear_scpi_status(k_g)
-                k_g.write(':ABORt')
-                k_g.write(':SOUR:FUNC VOLT')
-                k_g.write(':SENS:FUNC "CURR"')
-                k_g.write('SENS:CURR:RSEN OFF')
-                k_g.write(f":ROUT:TERM {self.params['gate_terminal']}")
-                k_g.write(':SENS:CURR:AZER OFF')
-                k_g.write(':SENS:CURR:AVER OFF')
-                k_g.write(':SOUR:VOLT:READ:BACK OFF')
-                k_g.write(f":SENS:CURR:NPLC {GATE_MONITOR_NPLC}")
-                k_g.write(':SENS:CURR:RANG:AUTO ON')
-                k_g.write(f":SOUR:VOLT:ILIM {self.params['g_ilimit']}")
-                k_g.write(':SOUR:VOLT 0')
+                configure_gate_meter(
+                    k_g,
+                    voltage_range=self.params['g_voltage_range'],
+                    current_limit=self.params['g_ilimit'],
+                    nplc=GATE_MONITOR_NPLC,
+                    terminal=self.params['gate_terminal'],
+                    autozero_mode='block_once',
+                    label='栅压表',
+                )
 
             if not self._interruptible_sleep(0.05, "仪器初始化中"):
                 return
@@ -613,16 +630,6 @@ class ItMeasurement:
                 autozero_mode='block_once',
                 label='偏压表',
             )
-            if self.params['gate_enabled']:
-                verify_current_configuration(
-                    k_g,
-                    nplc=GATE_MONITOR_NPLC,
-                    current_range='AUTO',
-                    current_limit=self.params['g_ilimit'],
-                    terminal=self.params['gate_terminal'],
-                    autozero_mode='block_once',
-                    label='栅压表',
-                )
         except Exception as exc:
             self.update_queue.put(('log', f"仪器初始化错误: {exc}"))
             raise
@@ -688,6 +695,8 @@ class ItMeasurement:
 
             if is_gate:
                 self.update_queue.put(('ramp_g', v, reading))
+                if self.params['acquisition_mode'] == ACQUISITION_REALTIME:
+                    check_gate_current_limit(reading, self.params['g_ilimit'])
             else:
                 self.update_queue.put(('ramp_b', v, reading))
 
@@ -851,9 +860,19 @@ class ItMeasurement:
             if not reports:
                 return
             elapsed = time.perf_counter() - started
-            if all(report['status'] == 'complete' for report in reports):
-                self.update_queue.put(('log', f'归零完成，用时 {elapsed:.1f} s'))
+            if all(shutdown_report_confirmed(report) for report in reports):
+                emergency = any(
+                    report['status'] == 'emergency_off' for report in reports
+                )
+                message = (
+                    '强制终止：已紧急归零并关闭输出'
+                    if emergency else f'归零完成，用时 {elapsed:.1f} s'
+                )
+                self.update_queue.put(('log', message))
                 self.update_queue.put(('log', '输出已关闭'))
+                self.update_queue.put(('ramp_b', 0.0, 0.0))
+                if self.params['gate_enabled']:
+                    self.update_queue.put(('ramp_g', 0.0, 0.0))
             else:
                 details = '; '.join(
                     ', '.join(report['errors']) for report in reports
@@ -876,6 +895,10 @@ class ItMeasurement:
             self.gate_keithley if self.params['gate_enabled'] else None,
             self.params['gate_monitor_interval'],
             lambda current: self.update_queue.put(('gate_leakage', current)),
+            gate_current_limit=(
+                self.params['g_ilimit']
+                if self.params['gate_enabled'] else None
+            ),
         )
         times, currents = [], []
         batch_t, batch_i = [], []
@@ -1142,6 +1165,24 @@ class ItMeasurement:
                         'bias_sequence_count': len(vb_list),
                         'combination_index': i_g * len(vb_list) + i_b + 1,
                         'combination_count': total_blocks,
+                        'gate_voltage_range_V': (
+                            self.params.get('g_voltage_range', 20.0)
+                            if self.params['gate_enabled'] else None
+                        ),
+                        'gate_current_range_A': (
+                            GATE_CURRENT_RANGE_A
+                            if self.params['gate_enabled'] else None
+                        ),
+                        'gate_current_limit_A': (
+                            self.params.get('g_ilimit', 1e-9)
+                            if self.params['gate_enabled'] else None
+                        ),
+                        'gate_software_monitoring': bool(
+                            self.params['gate_enabled']
+                            and self.params.get('acquisition_mode')
+                            == ACQUISITION_REALTIME
+                        ),
+                        'gate_current_limit_tripped': False,
                     }
                     reserved_path = allocate_unique_path(
                         self.params['output_folder'], fname
@@ -1166,6 +1207,11 @@ class ItMeasurement:
                         }
                         result_status = 'partial'
                         result_error = exc.cause
+                        if isinstance(exc.cause, GateCurrentLimitError):
+                            sequence_metadata['gate_current_limit_tripped'] = True
+                            self.update_queue.put((
+                                'log', f'栅电流保护触发，测试已停止: {exc.cause}'
+                            ))
                     except Exception:
                         release_path_reservation(reserved_path)
                         raise
@@ -1470,6 +1516,15 @@ class ItStepWidget(BaseAppWidget):
         configure_parameter_grid(gg_s, margins=(10, 0, 10, 0))
 
         add_param(gg_s, 0, 0, '目标电压 (V):', 'g_target_s', '0.5')
+        g_empty_label = QWidget()
+        g_empty_label.setFixedSize(140, 0)
+        g_empty_control = QWidget()
+        g_empty_control.setFixedHeight(0)
+        g_empty_control.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed
+        )
+        gg_s.addWidget(g_empty_label, 0, 2)
+        gg_s.addWidget(g_empty_control, 0, 3)
         gate_vbox.addWidget(self.wg_g_single)
 
         self.wg_g_step = QWidget()
@@ -1501,8 +1556,9 @@ class ItStepWidget(BaseAppWidget):
         g_common = QWidget()
         g_common_grid = QGridLayout(g_common)
         configure_parameter_grid(g_common_grid, margins=(10, 0, 10, 0))
-        add_param(g_common_grid, 0, 0, '爬坡/归零步长 (V):', 'g_ramp_step', '0.1')
+        add_param(g_common_grid, 0, 0, '电压量程 (V):', 'g_voltage_range', '20')
         add_param(g_common_grid, 1, 0, '电流限制 (A):', 'g_ilimit', '1e-9')
+        add_param(g_common_grid, 2, 0, '爬坡/归零步长 (V):', 'g_ramp_step', '0.1')
         add_param(g_common_grid, 0, 2, '栅压到位等待 (s):', 'g_settle', '20.0')
         add_param(g_common_grid, 1, 2, '偏压归零后等待 (s):', 'g_post_zero_wait', '2.0')
         gate_vbox.addWidget(g_common)
@@ -1545,6 +1601,15 @@ class ItStepWidget(BaseAppWidget):
         gb_s = QGridLayout(self.wg_b_single)
         configure_parameter_grid(gb_s, margins=(10, 0, 10, 0))
         add_param(gb_s, 0, 0, '目标电压 (V):', 'b_target_s', '0.1')
+        b_empty_label = QWidget()
+        b_empty_label.setFixedSize(140, 0)
+        b_empty_control = QWidget()
+        b_empty_control.setFixedHeight(0)
+        b_empty_control.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed
+        )
+        gb_s.addWidget(b_empty_label, 0, 2)
+        gb_s.addWidget(b_empty_control, 0, 3)
         bias_vbox.addWidget(self.wg_b_single)
 
         self.wg_b_step = QWidget()
@@ -1867,6 +1932,7 @@ class ItStepWidget(BaseAppWidget):
                     it_plot.get('it_max_odd_harmonic', 5)
                 ),
                 'g_ramp_step': float(p['g_ramp_step']),
+                'g_voltage_range': float(p['g_voltage_range']),
                 'g_step_delay': DEFAULT_GATE_RAMP_STEP_DELAY_S,
                 'g_ilimit': float(p['g_ilimit']),
                 'g_settle': float(p['g_settle']),
@@ -1880,6 +1946,8 @@ class ItStepWidget(BaseAppWidget):
             })
             if preset['g_ramp_step'] <= 0:
                 raise ValueError('栅压爬坡步长必须为正值')
+            validate_voltage_range(preset['g_voltage_range'], '栅压量程')
+            check_gate_current_limit(0.0, preset['g_ilimit'])
             if preset['b_ramp_step'] <= 0:
                 raise ValueError('偏压爬坡步长必须为正值')
 

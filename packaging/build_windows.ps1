@@ -17,6 +17,7 @@ $builtExe = Join-Path $builtApp "$appName.exe"
 $builtRuntime = Join-Path $builtApp "runtime"
 $releaseStage = Join-Path $releaseRoot $archiveName
 $releaseZip = Join-Path $releaseRoot "$archiveName.zip"
+$plotSmokeRoot = Join-Path $buildRoot "packaged-plot-smoke"
 $iconPath = Join-Path $repoRoot "assets\app_icon.ico"
 $originalPath = $env:PATH
 
@@ -35,6 +36,25 @@ function Remove-BuildPath([string]$Path) {
     }
     elseif (Test-Path -LiteralPath $Path) {
         Remove-Item -LiteralPath $Path -Force
+    }
+}
+
+function Compress-ReleaseArchive([string]$Source, [string]$Destination) {
+    for ($attempt = 1; $attempt -le 5; $attempt++) {
+        try {
+            Remove-BuildPath $Destination
+            Compress-Archive -Path (Join-Path $Source "*") `
+                -DestinationPath $Destination -CompressionLevel Optimal
+            return
+        }
+        catch {
+            if ($attempt -eq 5) { throw }
+            Write-Warning (
+                "Release files are temporarily locked; retrying archive " +
+                "creation ($attempt/5)..."
+            )
+            Start-Sleep -Seconds 2
+        }
     }
 }
 
@@ -65,6 +85,9 @@ try {
         --onedir `
         --windowed `
         --icon $iconPath `
+        --hidden-import matplotlib.backends.backend_svg `
+        --hidden-import matplotlib.backends.backend_pdf `
+        --hidden-import matplotlib.backends.backend_agg `
         --add-data "$iconPath;assets" `
         --name $appName `
         --contents-directory runtime `
@@ -79,13 +102,42 @@ try {
     if (-not (Test-Path -LiteralPath $builtRuntime -PathType Container)) {
         throw "The packaged runtime directory was not found."
     }
+    $archiveListing = & $Python -m PyInstaller.utils.cliutils.archive_viewer `
+        -r -b $builtExe 2>&1
+    foreach ($backend in @(
+        "matplotlib.backends.backend_svg",
+        "matplotlib.backends.backend_pdf",
+        "matplotlib.backends.backend_agg"
+    )) {
+        if (-not ($archiveListing -match [regex]::Escape($backend))) {
+            throw "The packaged executable is missing $backend."
+        }
+    }
+    Remove-BuildPath $plotSmokeRoot
+    New-Item -ItemType Directory -Path $plotSmokeRoot -Force | Out-Null
+    $smokeProcess = Start-Process -FilePath $builtExe `
+        -ArgumentList @(
+            "--plot-smoke-test",
+            ('"{0}"' -f $plotSmokeRoot)
+        ) `
+        -PassThru -Wait -WindowStyle Hidden
+    if ($smokeProcess.ExitCode -ne 0) {
+        throw "The packaged SVG/PDF/PNG smoke test failed."
+    }
+    $smokeOutputs = Get-ChildItem -LiteralPath $plotSmokeRoot -Recurse -File
+    foreach ($extension in @(".svg", ".pdf", ".png")) {
+        if (-not ($smokeOutputs | Where-Object { $_.Extension -eq $extension })) {
+            throw "The packaged plot smoke test did not create $extension."
+        }
+    }
+    Remove-BuildPath $plotSmokeRoot
     $bundledIcu = Get-ChildItem -LiteralPath $builtRuntime -File -Filter "icu*.dll"
     if ($bundledIcu) {
         $names = ($bundledIcu.Name -join ", ")
         throw "Unexpected ICU DLLs were bundled ($names). Check the build PATH before publishing."
     }
 
-    Write-Host "[3/3] Creating the GitHub Release archive..."
+    Write-Host "[3/3] Creating the local release archive..."
     Remove-BuildPath $releaseStage
     Remove-BuildPath $releaseZip
     New-Item -ItemType Directory -Path $releaseStage -Force | Out-Null
@@ -93,7 +145,7 @@ try {
     Copy-Item -LiteralPath $builtRuntime -Destination $releaseStage -Recurse
     Copy-Item -LiteralPath (Join-Path $repoRoot "configs") -Destination $releaseStage -Recurse
     Copy-Item -LiteralPath (Join-Path $repoRoot "Readme.md") -Destination $releaseStage
-    Compress-Archive -Path (Join-Path $releaseStage "*") -DestinationPath $releaseZip -CompressionLevel Optimal
+    Compress-ReleaseArchive $releaseStage $releaseZip
 
     $zipSize = [math]::Round((Get-Item -LiteralPath $releaseZip).Length / 1MB, 1)
     foreach ($temporaryPath in @(

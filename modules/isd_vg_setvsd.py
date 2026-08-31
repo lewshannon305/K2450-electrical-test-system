@@ -29,6 +29,9 @@ from core.hardware_base import (
     allocate_unique_path,
     atomic_text_writer,
     clear_scpi_status,
+    check_gate_current_limit,
+    configure_gate_meter,
+    gate_safety_metadata,
     configure_current_autozero,
     generate_exact_ramp_levels,
     reliable_output_off,
@@ -42,7 +45,7 @@ from core.hardware_base import (
     validate_source_voltage,
     validate_terminal,
     validate_voltage_range,
-    validate_voltage_within_range,
+    validate_gate_voltage_within_range,
     verify_current_configuration,
     write_result_metadata,
 )
@@ -134,6 +137,7 @@ class IsdVgMeasurement:
         bias = gate = None
         current_vg = 0
         current_bias = 0
+        measurement_bias = None
         current_seg = _1
 
         user_stopped = False
@@ -172,7 +176,7 @@ class IsdVgMeasurement:
                 self.preset['Vg_step'],
             )
             for voltage in vg_values:
-                validate_voltage_within_range(
+                validate_gate_voltage_within_range(
                     voltage,
                     self.preset['Gate_VOLT_RANGE'],
                     'Isd-Vg栅压点',
@@ -182,9 +186,7 @@ class IsdVgMeasurement:
                 self.preset['Bias_I_LIMIT'],
                 '偏压',
             )
-            validate_current_range_limit(
-                'AUTO', self.preset['Gate_I_LIMIT'], '栅极'
-            )
+            check_gate_current_limit(0.0, self.preset['Gate_I_LIMIT'])
             try:
                 bias = rm.open_resource(self.preset['BIAS_ADDR'])
                 bias.timeout = 5000
@@ -221,18 +223,14 @@ class IsdVgMeasurement:
                 bias.write(f":SOUR:VOLT:ILIM {self.preset['Bias_I_LIMIT']}")
                 bias.write(':SOUR:VOLT:RANG:AUTO ON')
 
-                gate.write('*RST')
-                clear_scpi_status(gate)
-                gate.write(':SENS:CURR:RSEN OFF')
-                gate.write(f":ROUT:TERM {self.preset['GATE_TERM']}")
-                gate.write(':SOUR:FUNC VOLT')
-                gate.write(':SOUR:VOLT 0')
-                gate.write(f":SOUR:VOLT:RANG {self.preset['Gate_VOLT_RANGE']}")
-                gate.write(f":SOUR:VOLT:ILIM {self.preset['Gate_I_LIMIT']}")
-                gate.write(':SENS:FUNC "CURR"')
-                gate.write(':SENS:CURR:NPLC 1')
-                configure_current_autozero(gate, 'continuous')
-                gate.write(':SENS:CURR:RANG:AUTO ON')
+                configure_gate_meter(
+                    gate,
+                    voltage_range=self.preset['Gate_VOLT_RANGE'],
+                    current_limit=self.preset['Gate_I_LIMIT'],
+                    nplc=1,
+                    terminal=self.preset['GATE_TERM'],
+                    label='Isd-Vg栅压表',
+                )
                 verify_current_configuration(
                     bias,
                     nplc=self.preset['Bias_NPLC'],
@@ -241,15 +239,6 @@ class IsdVgMeasurement:
                     terminal=self.preset['BIAS_TERM'],
                     autozero_mode='continuous',
                     label='Isd-Vg偏压表',
-                )
-                verify_current_configuration(
-                    gate,
-                    nplc=1,
-                    current_range='AUTO',
-                    current_limit=self.preset['Gate_I_LIMIT'],
-                    terminal=self.preset['GATE_TERM'],
-                    autozero_mode='continuous',
-                    label='Isd-Vg栅压表',
                 )
                 bias.write(':OUTP ON')
                 gate.write(':OUTP ON')
@@ -287,10 +276,26 @@ class IsdVgMeasurement:
                     )
                     self.update_queue.put(
                         ('status_data', (current_vg, current_bias, isd, ig, '偏压爬坡中')))
+                    try:
+                        check_gate_current_limit(
+                            ig, self.preset['Gate_I_LIMIT']
+                        )
+                    except Exception:
+                        threshold_exceeded = True
+                        self.update_queue.put((
+                            'alarm', f'栅电流达到保护限值: {ig:.2e} A'
+                        ))
+                        break
 
                 if user_stopped:
                     raise KeyboardInterrupt('UserStop')
+                if threshold_exceeded:
+                    raise RuntimeError('栅电流保护触发')
                 self.update_queue.put(('log', '偏压爬坡完成。'))
+
+            # Preserve the voltage used for the formal scan.  current_bias is
+            # subsequently changed by final zeroing and must not be persisted.
+            measurement_bias = current_bias
 
             if self.preset['Bias_Delay'] > 0 and not self.stop_event.is_set():
                 self.update_queue.put(
@@ -351,14 +356,16 @@ class IsdVgMeasurement:
                 all_ig.append(ig)
                 all_seg.append(seg)
 
-                if abs(ig) > self.preset['Ig_THRESHOLD']:
-                    alarm_msg = f"栅电流超过阈值: {ig:.2e} A"
+                try:
+                    check_gate_current_limit(ig, self.preset['Gate_I_LIMIT'])
+                except Exception:
+                    alarm_msg = f"栅电流达到保护限值: {ig:.2e} A"
                     self.update_queue.put(('alarm', alarm_msg))
                     threshold_exceeded = True
                     break
 
                 self.update_queue.put(
-                    ('data', (vg, isd, ig, seg, current_bias)))
+                    ('data', (vg, isd, ig, seg, measurement_bias)))
 
                 if idx == len(vg_list) - 1:
                     scan_completed = True
@@ -485,7 +492,8 @@ class IsdVgMeasurement:
 
             self.update_queue.put(
                 ('finished', (all_vg, all_isd, all_ig, all_seg,
-                 current_bias, scan_completed, finish_reason))
+                 measurement_bias if measurement_bias is not None else current_bias,
+                 scan_completed, finish_reason))
             )
 
 
@@ -596,9 +604,9 @@ class IsdVgSetVsdWidget(BaseAppWidget):
         bias_items = [
             ('目标电压 (V):', 'Bias_target', '0.002'),
             ('扫描步长 (V):', 'Bias_step', '0.001'),
-            ('电流限制 (A):', 'Bias_I_LIMIT', '1.05e-7'),
             ('测量 NPLC:', 'Bias_NPLC', '10.0'),
             ('电流量程 (A):', 'Bias_RANGE', '1e-7'),
+            ('电流限制 (A):', 'Bias_I_LIMIT', '1.05e-7'),
             ('偏压到位等待 (s):', 'Bias_Delay', '3.0'),
         ]
         for i, (label, key, default) in enumerate(bias_items):
@@ -628,7 +636,7 @@ class IsdVgSetVsdWidget(BaseAppWidget):
             ('第二目标电压 (V):', 'Vg_2nd', '-5.0'),
             ('扫描步长 (V):', 'Vg_step', '0.05'),
             ('电压量程 (V):', 'Gate_VOLT_RANGE', '20.0'),
-            ('电流保护阈值 (A):', 'Ig_THRESHOLD', '1e-9'),
+            ('电流限制 (A):', 'Gate_I_LIMIT', '1e-9'),
             ('栅压稳定时间 (s):', 'SETTLE_TIME', '0.1'),
         ]
         for i, (label, key, default) in enumerate(gate_items):
@@ -760,7 +768,6 @@ class IsdVgSetVsdWidget(BaseAppWidget):
                     preset[key] = val
                 else:
                     preset[key] = float(val)
-            preset['Gate_I_LIMIT'] = 1e-9
             if preset['Bias_I_LIMIT'] <= 0:
                 raise ValueError('偏压限流必须大于 0')
             if preset['Bias_NPLC'] <= 0:
@@ -774,11 +781,13 @@ class IsdVgSetVsdWidget(BaseAppWidget):
                 raise ValueError('偏压后延时不能为负值')
             if preset['Gate_VOLT_RANGE'] <= 0:
                 raise ValueError('栅压量程必须大于 0')
-            if preset['Ig_THRESHOLD'] <= 0:
-                raise ValueError('电流保护阈值必须大于 0')
+            check_gate_current_limit(0.0, preset['Gate_I_LIMIT'])
             if preset['SETTLE_TIME'] < 0:
                 raise ValueError('稳定时间不能为负值')
             validate_program_step_plan('isd_vg', preset)
+            self._gate_safety_metadata = gate_safety_metadata(
+                preset['Gate_VOLT_RANGE'], preset['Gate_I_LIMIT'], True
+            )
         except ValueError as exc:
             self.log_info(f"参数格式错误：{exc}")
             self.show_parameter_error(exc)
@@ -1051,6 +1060,12 @@ class IsdVgSetVsdWidget(BaseAppWidget):
                     point_count=len(vg_seg),
                     error=error,
                     stopped_at_local=stopped_at_local,
+                    extra={
+                        **getattr(self, '_gate_safety_metadata', {}),
+                        'bias_voltage_V': float(vsd_fixed),
+                        'gate_current_limit_tripped': status != 'complete'
+                        and str(error) == 'threshold',
+                    },
                 )
                 self.post_log(f"段{seg}数据已保存至: {full_path}")
                 saved_paths.append(str(full_path))

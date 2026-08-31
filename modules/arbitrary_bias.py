@@ -18,9 +18,12 @@ from core.hardware_base import (
     allocate_unique_path,
     atomic_text_writer,
     clear_scpi_status,
+    check_gate_current_limit,
+    configure_gate_meter,
     configure_current_autozero,
     fast_shutdown_zero_2450,
     reliable_output_off,
+    shutdown_report_confirmed,
     required_float_query,
     validate_2450_idn,
     validate_current_range_limit,
@@ -31,8 +34,12 @@ from core.hardware_base import (
     validate_step_divides_interval,
     validate_source_voltage,
     validate_terminal,
+    validate_voltage_range,
+    validate_gate_voltage_within_range,
     verify_current_configuration,
     write_result_metadata,
+    GATE_CURRENT_RANGE_A,
+    GateCurrentLimitError,
 )
 from core.instrument_config import InstrumentSettings
 from core.ui_builder import (
@@ -343,7 +350,11 @@ class ArbMeasurement:
                 validate_terminal(self.params['gate_terminal'], '栅压端子')
                 validate_source_voltage(self.params['g_target'], '栅压目标')
                 validate_positive_step(self.params['g_ramp_step'], '栅压爬坡步长')
-                validate_current_range_limit('AUTO', self.params['g_ilimit'], '栅极')
+                check_gate_current_limit(0.0, self.params['g_ilimit'])
+                validate_gate_voltage_within_range(
+                    self.params['g_target'], self.params['g_voltage_range'],
+                    '栅压目标',
+                )
             validate_program_step_plan('arbitrary_bias', self.params)
             k_b = self.bias_k
             k_b.write('*RST')
@@ -370,20 +381,15 @@ class ArbMeasurement:
 
             if self.params['gate_enabled']:
                 k_g = self.gate_k
-                k_g.write('*RST')
-                clear_scpi_status(k_g)
-                k_g.write(':ABORt')
-                k_g.write(':SOUR:FUNC VOLT')
-                k_g.write(':SENS:FUNC "CURR"')
-                k_g.write('SENS:CURR:RSEN OFF')
-                k_g.write(f':ROUT:TERM {self.params["gate_terminal"]}')
-                k_g.write(':SENS:CURR:AVER OFF')
-                k_g.write(':SOUR:VOLT:READ:BACK OFF')
-                k_g.write(f':SENS:CURR:NPLC {GATE_MONITOR_NPLC}')
-                k_g.write(':SENS:CURR:RANG:AUTO ON')
-                configure_current_autozero(k_g, 'block_once')
-                k_g.write(f':SOUR:VOLT:ILIM {self.params["g_ilimit"]}')
-                k_g.write(':SOUR:VOLT 0')
+                configure_gate_meter(
+                    k_g,
+                    voltage_range=self.params['g_voltage_range'],
+                    current_limit=self.params['g_ilimit'],
+                    nplc=GATE_MONITOR_NPLC,
+                    terminal=self.params['gate_terminal'],
+                    autozero_mode='block_once',
+                    label='任意偏压栅表',
+                )
 
             if not self._sleep(0.05):
                 return
@@ -396,16 +402,6 @@ class ArbMeasurement:
                 autozero_mode='block_once',
                 label='任意偏压表',
             )
-            if self.params['gate_enabled']:
-                verify_current_configuration(
-                    k_g,
-                    nplc=GATE_MONITOR_NPLC,
-                    current_range='AUTO',
-                    current_limit=self.params['g_ilimit'],
-                    terminal=self.params['gate_terminal'],
-                    autozero_mode='block_once',
-                    label='任意偏压栅表',
-                )
         except Exception as e:
             self.update_queue.put(('log', f"仪器初始化错误: {e}"))
             raise
@@ -470,6 +466,8 @@ class ArbMeasurement:
 
             if is_gate:
                 self.update_queue.put(('ramp_g', v, reading))
+                if self.params['acquisition_mode'] != ACQUISITION_TRIGGERED:
+                    check_gate_current_limit(reading, self.params['g_ilimit'])
             else:
                 self.update_queue.put(('ramp_b', v, reading))
             if v == target_v:
@@ -495,9 +493,19 @@ class ArbMeasurement:
             if not reports:
                 return
             elapsed = time.perf_counter() - started
-            if all(report['status'] == 'complete' for report in reports):
-                self.update_queue.put(('log', f'归零完成，用时 {elapsed:.1f} s'))
+            if all(shutdown_report_confirmed(report) for report in reports):
+                emergency = any(
+                    report['status'] == 'emergency_off' for report in reports
+                )
+                message = (
+                    '强制终止：已紧急归零并关闭输出'
+                    if emergency else f'归零完成，用时 {elapsed:.1f} s'
+                )
+                self.update_queue.put(('log', message))
                 self.update_queue.put(('log', '输出已关闭'))
+                self.update_queue.put(('ramp_b', 0.0, 0.0))
+                if self.params['gate_enabled']:
+                    self.update_queue.put(('ramp_g', 0.0, 0.0))
             else:
                 details = '; '.join(
                     ', '.join(report['errors']) for report in reports
@@ -512,7 +520,25 @@ class ArbMeasurement:
     def run(self):
         times, v_outs, i_outs = [], [], []
         collector = None
-        metadata = {}
+        metadata = {
+            'gate_voltage_range_V': (
+                self.params.get('g_voltage_range')
+                if self.params.get('gate_enabled') else None
+            ),
+            'gate_current_range_A': (
+                GATE_CURRENT_RANGE_A
+                if self.params.get('gate_enabled') else None
+            ),
+            'gate_current_limit_A': (
+                self.params.get('g_ilimit')
+                if self.params.get('gate_enabled') else None
+            ),
+            'gate_software_monitoring': bool(
+                self.params.get('gate_enabled')
+                and self.params.get('acquisition_mode') != ACQUISITION_TRIGGERED
+            ),
+            'gate_current_limit_tripped': False,
+        }
         vg = self.params['g_target'] if self.params['gate_enabled'] else 0.0
         try:
             self.connect()
@@ -554,6 +580,10 @@ class ArbMeasurement:
                     self.gate_k if self.params['gate_enabled'] else None,
                     self.params['gate_monitor_interval'],
                     lambda current: self.update_queue.put(('gate_leakage', current)),
+                    gate_current_limit=(
+                        self.params['g_ilimit']
+                        if self.params['gate_enabled'] else None
+                    ),
                 )
 
             for cycle in range(1, cycles + 1):
@@ -620,6 +650,11 @@ class ArbMeasurement:
                  metadata))
 
         except Exception as e:
+            if isinstance(e, GateCurrentLimitError):
+                metadata['gate_current_limit_tripped'] = True
+                self.update_queue.put((
+                    'log', f'栅电流保护触发，测试已停止: {e}'
+                ))
             self.update_queue.put(('log', f"测量中断或出错: {e}"))
             if collector is not None and not times:
                 try:
@@ -818,7 +853,7 @@ class ArbitraryBiasWidget(BaseAppWidget):
         add_p(3, 0, "跃变缓冲时延 (s):", "switch_settle", "0.0")
         add_p(4, 0, "爬坡/归零步长 (V):", "b_ramp_step", "0.001")
         add_p(2, 2, "电流量程 (A):", "b_range", "1e-6")
-        add_p(3, 2, "电流限制 (A):", "b_ilimit", "0.1")
+        add_p(3, 2, "电流限制 (A):", "b_ilimit", "1.05e-6")
         bind_range_to_limit(self.inputs['b_range'], self.inputs['b_ilimit'])
 
         box_vbox.addWidget(meas_box)
@@ -846,8 +881,9 @@ class ArbitraryBiasWidget(BaseAppWidget):
         add_gp(0, 0, "目标电压 (V):", "g_target", "0.0")
         add_gp(1, 0, "爬坡/归零步长 (V):", "g_ramp_step", "0.1")
         add_gp(2, 0, "栅压单步延时 (s):", "g_step_delay", "0.5")
-        add_gp(0, 2, "栅压到位等待 (s):", "g_settle", "20.0")
+        add_gp(0, 2, "电压量程 (V):", "g_voltage_range", "20")
         add_gp(1, 2, "电流限制 (A):", "g_ilimit", "1e-9")
+        add_gp(2, 2, "栅压到位等待 (s):", "g_settle", "20.0")
 
         box_vbox.addWidget(self.gate_box)
         self.gate_box.setVisible(False)
@@ -1002,6 +1038,7 @@ class ArbitraryBiasWidget(BaseAppWidget):
                 'b_ilimit': float(p['b_ilimit']),
 
                 'g_target': float(p['g_target']),
+                'g_voltage_range': float(p['g_voltage_range']),
                 'g_ramp_step': g_ramp_step,
                 'g_step_delay': float(p['g_step_delay']),
                 'g_settle': float(p['g_settle']),
@@ -1025,8 +1062,8 @@ class ArbitraryBiasWidget(BaseAppWidget):
                 raise ValueError('栅压单步时延不能为负值')
             if preset['g_settle'] < 0:
                 raise ValueError('栅压到位等待不能为负值')
-            if preset['g_ilimit'] <= 0:
-                raise ValueError('栅压限流必须大于 0')
+            validate_voltage_range(preset['g_voltage_range'], '栅压量程')
+            check_gate_current_limit(0.0, preset['g_ilimit'])
             for _, duration in preset['waveform']:
                 if duration <= 0:
                     raise ValueError('波形每段时长必须大于 0')

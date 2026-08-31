@@ -2,6 +2,7 @@ import copy
 import json
 import os
 import re
+import textwrap
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSplitter,
     QSpinBox,
     QStackedWidget,
     QTabWidget,
@@ -36,8 +38,8 @@ from PyQt6.QtWidgets import (
 
 from core.paths import config_directory
 from matplotlib.figure import Figure
-from matplotlib.colors import TwoSlopeNorm
-from matplotlib.ticker import ScalarFormatter
+from matplotlib.colors import Normalize, TwoSlopeNorm
+from matplotlib.ticker import MaxNLocator, ScalarFormatter
 import pyqtgraph as pg
 
 
@@ -51,6 +53,16 @@ MODULE_NAMES = {
     'arbitrary_gate': '任意栅压波形测试',
 }
 
+MODULE_FOLDERS = {
+    'break_junction': 'Break',
+    'iv_curve': 'IV',
+    'isd_vg_setvsd': 'Isd_Vg',
+    'mapping_scan': 'Mapping',
+    'it_step_setgate': 'It',
+    'arbitrary_bias': 'Arbitrary_Bias',
+    'arbitrary_gate': 'Arbitrary_Gate',
+}
+
 
 def select_preview_paths(image_paths, module_id=None):
     """Return the PNGs that should be shown after a completed measurement."""
@@ -61,9 +73,7 @@ def select_preview_paths(image_paths, module_id=None):
     if module_id == 'mapping_scan':
         differential = [
             path for path in paths
-            if os.path.basename(path).startswith(
-                'differential_conductance_mapping'
-            )
+            if 'differential_conductance_mapping' in os.path.basename(path)
         ]
         if differential:
             return differential
@@ -89,92 +99,87 @@ def default_plot_settings():
         'arbitrary_bias': (120.0, 100.0),
         'arbitrary_gate': (120.0, 100.0),
     }
+    modules = {
+        module_id: {
+            'enabled': True,
+            'current_scale': 'linear',
+            'x_scale': 'linear',
+            'title': module_defaults[module_id][0],
+            'x_label': module_defaults[module_id][1],
+            'y_label': module_defaults[module_id][2],
+            'x_min': '',
+            'x_max': '',
+            'y_min': '',
+            'y_max': '',
+            'primary_color': '#1565C0',
+            'secondary_color': '#D32F2F',
+            'line_width': 1.0,
+            'marker': 'none',
+            'colormap': (
+                'RdBu_r' if module_id == 'mapping_scan' else 'viridis'
+            ),
+            'width_mm': dimensions[module_id][0],
+            'height_mm': dimensions[module_id][1],
+            'size_preset': (
+                'single' if dimensions[module_id][0] == 89.0
+                else 'double' if dimensions[module_id][0] == 183.0
+                else 'one_half'
+            ),
+            'formats': ['svg', 'pdf', 'png'],
+            'dpi': 450,
+            'font_family': 'Arial',
+            'title_size': 7,
+            'label_size': 7,
+            'tick_size': 6,
+            'grid': False,
+            'legend': True,
+            'legend_location': (
+                'upper left' if module_id == 'iv_curve' else 'best'
+            ),
+            'minor_ticks': False,
+            'tick_direction': 'out',
+            'tick_length': 4.0,
+            'tick_width': 0.8,
+        }
+        for module_id in MODULE_NAMES
+    }
+    modules['iv_curve'].update({
+        'iv_file_mode': 'group',
+        'iv_gate_mode': 'per_gate',
+        'iv_cycle_mode': 'per_cycle',
+    })
+    modules['isd_vg_setvsd'].update({
+        'isd_mode': 'stacked',
+        'isd_offset_mode': 'auto',
+        'isd_offset': 0.0,
+    })
+    modules['mapping_scan'].update({
+        'mapping_full_iv': False,
+        'mapping_full_iv_summary': False,
+        'savgol_window': 11,
+        'savgol_order': 2,
+    })
+    modules['it_step_setgate'].update({
+        'it_bin_method': 'fd',
+        'it_bins': 50,
+        'it_bin_width': 0.0,
+        'it_hist_norm': 'density',
+        'it_show_mean': True,
+        'it_show_median': True,
+        'it_show_std': True,
+        'it_line_filter_mode': 'off',
+        'it_line_frequency': 50.0,
+        'it_line_search_hz': 0.5,
+        'it_max_odd_harmonic': 5,
+    })
     return {
-        'plot_schema_version': 2,
+        'plot_schema_version': 3,
         'auto_plot': True,
         'plot_partial': True,
         'show_preview': True,
-        'format': 'png',
-        'dpi': 300,
-        'width': 9.0,
-        'height': 6.0,
-        'grid': True,
-        'font_family': 'Arial',
-        'title_size': 14,
-        'label_size': 11,
-        'tick_size': 10,
-        'primary_color': '#1565C0',
-        'secondary_color': '#D32F2F',
-        'background_color': '#FFFFFF',
-        'grid_color': '#B0B0B0',
-        'line_width': 1.8,
-        'output_mode': 'plots_subfolder',
+        'output_mode': 'root_figures',
         'output_folder': '',
-        'modules': {
-            module_id: {
-                'enabled': True,
-                'current_scale': 'linear',
-                'x_scale': 'linear',
-                'title': module_defaults[module_id][0],
-                'x_label': module_defaults[module_id][1],
-                'y_label': module_defaults[module_id][2],
-                'x_min': '',
-                'x_max': '',
-                'y_min': '',
-                'y_max': '',
-                'primary_color': '#1565C0',
-                'secondary_color': '#D32F2F',
-                'line_width': 1.0,
-                'marker': 'none',
-                'colormap': (
-                    'RdBu_r' if module_id == 'mapping_scan' else 'viridis'
-                ),
-                'width_mm': dimensions[module_id][0],
-                'height_mm': dimensions[module_id][1],
-                'size_preset': (
-                    'single' if dimensions[module_id][0] == 89.0
-                    else 'double' if dimensions[module_id][0] == 183.0
-                    else 'one_half'
-                ),
-                'formats': ['svg', 'pdf', 'png'],
-                'dpi': 450 if module_id == 'mapping_scan' else 300,
-                'font_family': 'Arial',
-                'title_size': 7,
-                'label_size': 7,
-                'tick_size': 7,
-                'grid': False,
-                'legend': True,
-                'legend_location': 'best',
-                'top_spine': False,
-                'right_spine': False,
-                'minor_ticks': False,
-                'tick_direction': 'out',
-                'tick_length': 4.0,
-                'tick_width': 0.8,
-                'iv_file_mode': 'group',
-                'iv_gate_mode': 'per_gate',
-                'iv_cycle_mode': 'per_cycle',
-                'isd_mode': 'overlay',
-                'isd_offset_mode': 'auto',
-                'isd_offset': 0.0,
-                'mapping_full_iv': False,
-                'mapping_full_iv_summary': False,
-                'savgol_window': 11,
-                'savgol_order': 2,
-                'it_bin_method': 'fd',
-                'it_bins': 50,
-                'it_bin_width': 0.0,
-                'it_hist_norm': 'density',
-                'it_show_mean': True,
-                'it_show_median': True,
-                'it_show_std': True,
-                'it_line_filter_mode': 'off',
-                'it_line_frequency': 50.0,
-                'it_line_search_hz': 0.5,
-                'it_max_odd_harmonic': 5,
-            }
-            for module_id in MODULE_NAMES
-        },
+        'modules': modules,
     }
 
 
@@ -182,12 +187,16 @@ def merge_plot_settings(value):
     settings = default_plot_settings()
     if not isinstance(value, dict):
         return settings
+    schema = value.get('plot_schema_version')
+    if schema is not None:
+        try:
+            if int(schema) != 3:
+                return settings
+        except (TypeError, ValueError):
+            return settings
     for key in (
-        'auto_plot', 'plot_partial', 'show_preview', 'format', 'dpi',
-        'width', 'height', 'grid', 'output_mode', 'output_folder',
-        'font_family', 'title_size', 'label_size', 'tick_size',
-        'primary_color', 'secondary_color', 'background_color',
-        'grid_color', 'line_width',
+        'auto_plot', 'plot_partial', 'show_preview',
+        'output_mode', 'output_folder',
     ):
         if key in value:
             settings[key] = value[key]
@@ -195,8 +204,13 @@ def merge_plot_settings(value):
     if isinstance(modules, dict):
         for module_id, module_value in modules.items():
             if module_id in settings['modules'] and isinstance(module_value, dict):
-                settings['modules'][module_id].update(module_value)
-    settings['plot_schema_version'] = 2
+                allowed = settings['modules'][module_id]
+                clean_value = {
+                    key: item for key, item in module_value.items()
+                    if key in allowed
+                }
+                settings['modules'][module_id].update(clean_value)
+    settings['plot_schema_version'] = 3
     return settings
 
 
@@ -214,6 +228,96 @@ def load_default_plot_settings(fallback=None):
         return merge_plot_settings(fallback)
 
 
+class _AspectRatioContainer(QWidget):
+    """Center one child at a requested aspect ratio without cropping it."""
+
+    def __init__(self, child, parent=None):
+        super().__init__(parent)
+        self._child = child
+        self._aspect_ratio = 4.0 / 3.0
+        child.setParent(self)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+
+    def set_aspect_ratio(self, width, height):
+        try:
+            ratio = float(width) / float(height)
+        except (TypeError, ValueError, ZeroDivisionError):
+            ratio = 4.0 / 3.0
+        self._aspect_ratio = max(0.2, min(6.0, ratio))
+        self._layout_child()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._layout_child()
+
+    def _layout_child(self):
+        rect = self.contentsRect()
+        if rect.width() <= 0 or rect.height() <= 0:
+            return
+        available_ratio = rect.width() / rect.height()
+        if available_ratio > self._aspect_ratio:
+            height = rect.height()
+            width = round(height * self._aspect_ratio)
+        else:
+            width = rect.width()
+            height = round(width / self._aspect_ratio)
+        left = rect.left() + (rect.width() - width) // 2
+        top = rect.top() + (rect.height() - height) // 2
+        self._child.setGeometry(left, top, width, height)
+
+
+class _ResponsiveGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
+    """Keep pyqtgraph's central layout inside a small preview viewport."""
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self.fit_contents)
+
+    def fit_contents(self):
+        if not hasattr(self, 'ci'):
+            return
+        for item in self.ci.items:
+            if hasattr(item, 'setMinimumWidth'):
+                item.setMinimumWidth(90)
+            if hasattr(item, 'setMinimumHeight'):
+                item.setMinimumHeight(55)
+        self.ci.setMinimumSize(0, 0)
+        self.ci.setGeometry(QRectF(0, 0, self.width(), self.height()))
+
+
+class _BufferedPreviewPage(QWidget):
+    """Double-buffer a pyqtgraph preview so visible canvases are never cleared."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.stack = QStackedWidget()
+        layout.addWidget(self.stack)
+        self.canvases = []
+        for _index in range(2):
+            canvas = _ResponsiveGraphicsLayoutWidget()
+            canvas.useOpenGL(False)
+            canvas.setBackground('w')
+            canvas.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+            )
+            self.canvases.append(canvas)
+            self.stack.addWidget(canvas)
+
+    def inactive_canvas(self):
+        return self.canvases[1 - self.stack.currentIndex()]
+
+    def show_inactive_canvas(self):
+        self.stack.setCurrentIndex(1 - self.stack.currentIndex())
+        return self.stack.currentWidget()
+
+    def current_canvas(self):
+        return self.stack.currentWidget()
+
+
 class PlotSettingsDialog(QDialog):
     settings_applied = pyqtSignal(object)
 
@@ -227,12 +331,20 @@ class PlotSettingsDialog(QDialog):
             | Qt.WindowType.WindowMaximizeButtonHint
         )
         self.ui_font = QFont('Arial', 11)
-        self.bold_font = QFont('Arial', 11)
-        self.bold_font.setWeight(QFont.Weight.Bold)
+        self.setFont(self.ui_font)
+        self.setStyleSheet(
+            'QGroupBox::title { font-weight: 600; }'
+        )
         self._initial = merge_plot_settings(settings)
         self._module_values = copy.deepcopy(self._initial['modules'])
         self._current_module_id = None
         self._color_edits = {}
+        self._scroll_positions = {}
+        self._current_nav_key = '__unset__'
+        self._preview_pages = {}
+        self._preview_page_indices = {}
+        self._preview_dirty = {None, *MODULE_NAMES.keys()}
+        self._preview_panel_count = 1
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
         self._preview_timer.setInterval(180)
@@ -240,53 +352,75 @@ class PlotSettingsDialog(QDialog):
         self._build_ui()
         self._connect_preview_signals()
         self.nav.setCurrentRow(0)
-        self._render_preview()
+        if self.nav.currentRow() < 0:
+            self._navigation_changed(0)
 
     def _build_ui(self):
-        main_layout = QHBoxLayout(self)
+        main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(10, 10, 10, 10)
         main_layout.setSpacing(10)
 
+        body = QWidget()
+        body_layout = QHBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(10)
+
         nav_group = QGroupBox('绘图项目')
-        nav_group.setFont(self.bold_font)
         nav_layout = QVBoxLayout(nav_group)
         self.nav = QListWidget()
         self.nav.setFont(self.ui_font)
-        self.nav.setFixedWidth(210)
+        self.nav.setFixedWidth(190)
         self.nav.addItem('通用')
         for name in MODULE_NAMES.values():
             self.nav.addItem(name)
         self.nav.currentRowChanged.connect(self._navigation_changed)
         nav_layout.addWidget(self.nav)
-        main_layout.addWidget(nav_group, stretch=0)
+        nav_group.setFixedWidth(210)
+        body_layout.addWidget(nav_group, stretch=0)
+
+        self.content_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.content_splitter.setChildrenCollapsible(False)
 
         settings_group = QGroupBox('绘图设置')
-        settings_group.setFont(self.bold_font)
+        self.settings_group = settings_group
         settings_layout = QVBoxLayout(settings_group)
         self.settings_stack = QStackedWidget()
         settings_layout.addWidget(self.settings_stack)
-        self.settings_stack.addWidget(self._build_common_page())
-        self.settings_stack.addWidget(self._build_module_page())
-        main_layout.addWidget(settings_group, stretch=3)
+        self.common_scroll = self._build_common_page()
+        self.module_scroll = self._build_module_page()
+        self.settings_stack.addWidget(self.common_scroll)
+        self.settings_stack.addWidget(self.module_scroll)
+        settings_group.setMinimumWidth(360)
+        self.content_splitter.addWidget(settings_group)
 
-        preview_group = QGroupBox('单分子晶体管示例图（实时预览）')
-        preview_group.setFont(self.bold_font)
+        preview_group = QGroupBox('绘图效果预览')
         preview_layout = QVBoxLayout(preview_group)
-        self.preview_widget = pg.GraphicsLayoutWidget()
-        self.preview_widget.setBackground('w')
-        self.preview_widget.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
-        )
-        preview_layout.addWidget(self.preview_widget)
+        self.preview_stack = QStackedWidget()
+        preview_keys = [None, *MODULE_NAMES.keys()]
+        for index, key in enumerate(preview_keys):
+            page = _BufferedPreviewPage()
+            self._preview_pages[key] = page
+            self._preview_page_indices[key] = index
+            self.preview_stack.addWidget(page)
+        self.preview_widget = self._preview_pages[None].current_canvas()
+        self.preview_frame = _AspectRatioContainer(self.preview_stack)
+        preview_layout.addWidget(self.preview_frame, stretch=1)
         hint = QLabel(
-            '七个模块分别使用对应的单分子晶体管合成数据和绘图模板；'
-            '中间栏的修改会立即反映到当前图，并用于正式输出。'
-            '右侧为放大屏幕预览，文字和曲线显示尺寸会自动放大；'
-            '导出文件仍严格使用中间栏标注的物理 pt 数值。'
+            '右侧为当前模块的快速预览，并遵守设置的导出宽高比。'
+            '字体、刻度和图例为近似屏幕效果，正式文件以导出结果为准；'
+            '宽度预设只调整图片宽度，图片高度仍可独立设置。'
         )
         hint.setFont(self.ui_font)
         hint.setWordWrap(True)
         preview_layout.addWidget(hint)
+
+        preview_group.setMinimumWidth(480)
+        self.content_splitter.addWidget(preview_group)
+        self.content_splitter.setStretchFactor(0, 2)
+        self.content_splitter.setStretchFactor(1, 3)
+        self.content_splitter.setSizes([440, 700])
+        body_layout.addWidget(self.content_splitter, stretch=1)
+        main_layout.addWidget(body, stretch=1)
 
         button_layout = QHBoxLayout()
         self.btn_apply = QPushButton('应用')
@@ -301,7 +435,6 @@ class PlotSettingsDialog(QDialog):
             self.btn_set_default, self.btn_restore, self.btn_cancel,
             self.btn_ok,
         ):
-            button.setFont(self.bold_font)
             button.setMinimumSize(88, 30)
         self.btn_ok.setStyleSheet('color: #AA0000;')
         self.btn_apply.clicked.connect(self._apply_without_close)
@@ -319,19 +452,24 @@ class PlotSettingsDialog(QDialog):
         button_layout.addStretch()
         button_layout.addWidget(self.btn_cancel)
         button_layout.addWidget(self.btn_ok)
-        preview_layout.addLayout(button_layout)
-        main_layout.addWidget(preview_group, stretch=5)
+        main_layout.addLayout(button_layout)
+
+        self.setMinimumSize(1100, 650)
+        self._install_combo_tooltips()
 
     def _scroll_form(self):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOn
+        )
         scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
         content = QWidget()
         content.setSizePolicy(
-            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
         )
         form = QFormLayout(content)
         form.setContentsMargins(6, 6, 6, 6)
@@ -361,7 +499,7 @@ class PlotSettingsDialog(QDialog):
         storage = QGroupBox('输出位置')
         storage_form = QFormLayout(storage)
         self.combo_output = QComboBox()
-        self.combo_output.addItem('数据目录下的 plots 文件夹', 'plots_subfolder')
+        self.combo_output.addItem('根目录下的 figures 文件夹', 'root_figures')
         self.combo_output.addItem('指定文件夹', 'custom')
         idx = self.combo_output.findData(self._initial['output_mode'])
         self.combo_output.setCurrentIndex(max(0, idx))
@@ -376,9 +514,9 @@ class PlotSettingsDialog(QDialog):
         output_layout.addWidget(btn_browse)
         storage_form.addRow('指定文件夹：', output_row)
         note = QLabel(
-            '原始数据仍由九个测试程序分别保存，并未混在一个文件中。'
-            '绘图只读取本次测试结果清单；Mapping 的 full IV 将另存到 '
-            'plots/mapping/full_iv。'
+            '原始数据仍由七个测量模块分别保存，不会混在同一个文件中。'
+            '绘图只读取本次测量生成的数据；图片目录会镜像数据的模块'
+            '及子目录结构。'
         )
         note.setWordWrap(True)
         storage_form.addRow(note)
@@ -397,7 +535,7 @@ class PlotSettingsDialog(QDialog):
             return box_form
 
         data_form = group('数据与分组')
-        self.cb_module_enabled = QCheckBox('为该模块生成结束后绘图')
+        self.cb_module_enabled = QCheckBox('测量结束后为此模块自动绘图')
         data_form.addRow(self.cb_module_enabled)
 
         export_form = group('版式与导出')
@@ -415,15 +553,15 @@ class PlotSettingsDialog(QDialog):
         self.spin_height_mm.setRange(35.0, 170.0)
         self.spin_height_mm.setDecimals(1)
         self.spin_height_mm.setSuffix(' mm')
-        export_form.addRow('图片宽度：', self.spin_width_mm)
-        export_form.addRow('图片高度：', self.spin_height_mm)
+        export_form.addRow('图片宽度 (mm)：', self.spin_width_mm)
+        export_form.addRow('图片高度 (mm)：', self.spin_height_mm)
         self.edit_formats = QLineEdit()
         self.edit_formats.setPlaceholderText('svg, pdf, png')
         export_form.addRow('导出格式：', self.edit_formats)
         self.spin_module_dpi = QSpinBox()
         self.spin_module_dpi.setRange(150, 1200)
         self.spin_module_dpi.setSuffix(' DPI')
-        export_form.addRow('PNG 分辨率：', self.spin_module_dpi)
+        export_form.addRow('PNG 分辨率 (DPI)：', self.spin_module_dpi)
 
         axis_form = group('坐标轴与刻度')
         self.edit_title = QLineEdit()
@@ -460,8 +598,8 @@ class PlotSettingsDialog(QDialog):
         self.spin_tick_length.setRange(1.0, 10.0)
         self.spin_tick_width = QDoubleSpinBox()
         self.spin_tick_width.setRange(0.25, 2.0)
-        axis_form.addRow('刻度长度（pt）：', self.spin_tick_length)
-        axis_form.addRow('刻度线宽（pt）：', self.spin_tick_width)
+        axis_form.addRow('刻度长度 (pt)：', self.spin_tick_length)
+        axis_form.addRow('刻度线宽 (pt)：', self.spin_tick_width)
 
         text_form = group('标题与文字')
         text_form.addRow('图标题：', self.edit_title)
@@ -475,9 +613,9 @@ class PlotSettingsDialog(QDialog):
         self.spin_module_label_size.setRange(5, 12)
         self.spin_module_tick_size = QSpinBox()
         self.spin_module_tick_size.setRange(5, 10)
-        text_form.addRow('导出标题字号（pt）：', self.spin_module_title_size)
-        text_form.addRow('导出坐标轴字号（pt）：', self.spin_module_label_size)
-        text_form.addRow('导出刻度字号（pt）：', self.spin_module_tick_size)
+        text_form.addRow('导出标题字号 (pt)：', self.spin_module_title_size)
+        text_form.addRow('导出坐标轴字号 (pt)：', self.spin_module_label_size)
+        text_form.addRow('导出刻度字号 (pt)：', self.spin_module_tick_size)
 
         color_form = group('曲线与配色')
         self.module_primary = self._color_row(
@@ -489,7 +627,7 @@ class PlotSettingsDialog(QDialog):
         self.spin_module_line_width = QDoubleSpinBox()
         self.spin_module_line_width.setRange(0.25, 3.0)
         self.spin_module_line_width.setSingleStep(0.1)
-        color_form.addRow('导出曲线线宽（pt）：', self.spin_module_line_width)
+        color_form.addRow('导出曲线线宽 (pt)：', self.spin_module_line_width)
         self.combo_marker = QComboBox()
         for label, value in (
             ('无', 'none'), ('圆点', 'o'), ('方块', 's'),
@@ -507,12 +645,8 @@ class PlotSettingsDialog(QDialog):
         frame_form = group('图框、网格与图例')
         self.cb_module_grid = QCheckBox('显示网格')
         self.cb_module_legend = QCheckBox('显示图例')
-        self.cb_top_spine = QCheckBox('显示上边框')
-        self.cb_right_spine = QCheckBox('显示右边框')
         frame_form.addRow(self.cb_module_grid)
         frame_form.addRow(self.cb_module_legend)
-        frame_form.addRow(self.cb_top_spine)
-        frame_form.addRow(self.cb_right_spine)
         self.combo_legend_location = QComboBox()
         for label, value in (
             ('自动', 'best'), ('左上', 'upper left'),
@@ -590,7 +724,7 @@ class PlotSettingsDialog(QDialog):
                 self.spin_it_max_harmonic.setSingleStep(2)
                 page_form.addRow('工频处理：', self.combo_it_line_filter)
                 page_form.addRow('工频中心 (Hz)：', self.spin_it_line_frequency)
-                page_form.addRow('频率搜索 ±Hz：', self.spin_it_line_search)
+                page_form.addRow('频率搜索范围 (±Hz)：', self.spin_it_line_search)
                 page_form.addRow('最高奇次谐波：', self.spin_it_max_harmonic)
                 self.combo_it_bin_method = QComboBox()
                 for label, value in (
@@ -640,6 +774,31 @@ class PlotSettingsDialog(QDialog):
         self._paint_color_edit(edit)
         return edit
 
+    def _install_combo_tooltips(self):
+        """Keep form controls usable and expose text hidden by narrow themes."""
+        for form in self.settings_stack.findChildren(QFormLayout):
+            form.setLabelAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            )
+            form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+            for row in range(form.rowCount()):
+                item = form.itemAt(row, QFormLayout.ItemRole.LabelRole)
+                label = item.widget() if item is not None else None
+                if isinstance(label, QLabel):
+                    label.setFixedWidth(145)
+                    label.setWordWrap(True)
+        controls = []
+        for control_type in (QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox):
+            controls.extend(self.settings_stack.findChildren(control_type))
+        for control in controls:
+            control.setMinimumWidth(170)
+            control.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+            )
+        for combo in self.settings_stack.findChildren(QComboBox):
+            combo.setToolTip(combo.currentText())
+            combo.currentTextChanged.connect(combo.setToolTip)
+
     def _choose_color(self, key):
         edit = self._color_edits[key]
         initial = QColor(edit.text()) if QColor(edit.text()).isValid() else QColor('#000000')
@@ -677,7 +836,7 @@ class PlotSettingsDialog(QDialog):
             self.spin_module_dpi, self.module_font_family,
             self.spin_module_title_size, self.spin_module_label_size,
             self.spin_module_tick_size, self.cb_module_grid,
-            self.cb_module_legend, self.cb_top_spine, self.cb_right_spine,
+            self.cb_module_legend,
             self.cb_minor_ticks, self.combo_tick_direction,
             self.spin_tick_length, self.spin_tick_width,
             self.combo_legend_location,
@@ -733,8 +892,6 @@ class PlotSettingsDialog(QDialog):
             'tick_size': self.spin_module_tick_size.value(),
             'grid': self.cb_module_grid.isChecked(),
             'legend': self.cb_module_legend.isChecked(),
-            'top_spine': self.cb_top_spine.isChecked(),
-            'right_spine': self.cb_right_spine.isChecked(),
             'minor_ticks': self.cb_minor_ticks.isChecked(),
             'tick_direction': self.combo_tick_direction.currentData(),
             'tick_length': self.spin_tick_length.value(),
@@ -786,6 +943,9 @@ class PlotSettingsDialog(QDialog):
         self.edit_title.setText(str(value['title']))
         self.edit_x_label.setText(str(value['x_label']))
         self.edit_y_label.setText(str(value['y_label']))
+        self.edit_title.setCursorPosition(0)
+        self.edit_x_label.setCursorPosition(0)
+        self.edit_y_label.setCursorPosition(0)
         self.combo_x_scale.setCurrentIndex(
             max(0, self.combo_x_scale.findData(value['x_scale']))
         )
@@ -818,8 +978,6 @@ class PlotSettingsDialog(QDialog):
         self.spin_module_tick_size.setValue(int(value.get('tick_size', 6)))
         self.cb_module_grid.setChecked(bool(value.get('grid', False)))
         self.cb_module_legend.setChecked(bool(value.get('legend', True)))
-        self.cb_top_spine.setChecked(bool(value.get('top_spine', False)))
-        self.cb_right_spine.setChecked(bool(value.get('right_spine', False)))
         self.cb_minor_ticks.setChecked(bool(value.get('minor_ticks', False)))
         self.combo_tick_direction.setCurrentIndex(max(
             0, self.combo_tick_direction.findData(
@@ -904,22 +1062,42 @@ class PlotSettingsDialog(QDialog):
             control.blockSignals(False)
 
     def _navigation_changed(self, row):
+        if row < 0:
+            return
+        old_key = self._current_nav_key
+        if old_key != '__unset__':
+            old_scroll = self.common_scroll if old_key is None else self.module_scroll
+            self._scroll_positions[old_key] = old_scroll.verticalScrollBar().value()
+        self._preview_timer.stop()
         self._save_current_module()
-        if row <= 0:
-            self._current_module_id = None
-            self.settings_stack.setCurrentIndex(0)
-        else:
-            self._current_module_id = list(MODULE_NAMES)[row - 1]
-            self._load_module(self._current_module_id)
-            self.settings_stack.setCurrentIndex(1)
-        self.update_preview()
+        new_key = None if row == 0 else list(MODULE_NAMES)[row - 1]
+        self.settings_group.setUpdatesEnabled(False)
+        try:
+            if new_key is None:
+                self._current_module_id = None
+                self.settings_stack.setCurrentIndex(0)
+            else:
+                self._current_module_id = new_key
+                self._load_module(new_key)
+                self.settings_stack.setCurrentIndex(1)
+        finally:
+            self.settings_group.setUpdatesEnabled(True)
+            self.settings_group.update()
+        self._current_nav_key = new_key
+        self._update_preview_aspect(new_key)
+        if new_key in self._preview_dirty:
+            self._render_preview(new_key)
+        self.preview_stack.setCurrentIndex(self._preview_page_indices[new_key])
+        scroll = self.common_scroll if new_key is None else self.module_scroll
+        position = self._scroll_positions.get(new_key, 0)
+        QTimer.singleShot(
+            0, lambda item=scroll, value=position:
+            item.verticalScrollBar().setValue(value)
+        )
 
     def _connect_preview_signals(self):
         export_only_controls = {
             self.cb_module_enabled,
-            self.combo_size_preset,
-            self.spin_width_mm,
-            self.spin_height_mm,
             self.edit_formats,
             self.spin_module_dpi,
             self.cb_mapping_full_iv,
@@ -964,12 +1142,6 @@ class PlotSettingsDialog(QDialog):
         text = str(text).strip()
         return None if not text else float(text)
 
-    def _preview_style(self):
-        if self._current_module_id is not None:
-            self._save_current_module()
-            return self._module_values[self._current_module_id]
-        return None
-
     @staticmethod
     def _transfer_example():
         gate = np.linspace(-1.8, 1.8, 600)
@@ -988,21 +1160,70 @@ class PlotSettingsDialog(QDialog):
 
     def update_preview(self, *_args):
         if hasattr(self, '_preview_timer'):
+            self._save_current_module()
+            key = self._current_module_id
+            self._preview_dirty.add(key)
+            self._preview_dirty.add(None)
+            self._update_preview_aspect(key)
             self._preview_timer.start()
+
+    def _update_preview_aspect(self, module_id):
+        if module_id is None:
+            self.preview_frame.set_aspect_ratio(16, 9)
+            return
+        module = self._module_values[module_id]
+        self.preview_frame.set_aspect_ratio(
+            module.get('width_mm', 120.0),
+            module.get('height_mm', 90.0),
+        )
+
+    def _preview_font_sizes(self, module, compact=False):
+        width = max(320, self.preview_widget.width())
+        height = max(240, self.preview_widget.height())
+        panels = max(1, self._preview_panel_count)
+        area_scale = min(width / 760.0, height / 520.0)
+        panel_scale = min(1.0, (2.0 / panels) ** 0.28)
+        scale = max(0.68, min(1.3, area_scale * panel_scale))
+        if compact:
+            return (
+                max(7, min(11, round(9 * scale))),
+                max(7, min(10, round(8 * scale))),
+                max(6, min(9, round(7 * scale))),
+            )
+        return (
+            max(8, min(15, round(float(module.get('title_size', 7)) * 1.55 * scale))),
+            max(8, min(13, round(float(module.get('label_size', 7)) * 1.45 * scale))),
+            max(7, min(11, round(float(module.get('tick_size', 6)) * 1.3 * scale))),
+        )
+
+    def _wrap_preview_text(self, text, font_size, vertical=False):
+        text = str(text or '')
+        if not text or vertical:
+            return text
+        panel_width = max(
+            180,
+            self.preview_widget.width() / max(1, min(self._preview_panel_count, 4)),
+        )
+        max_chars = max(14, int(panel_width / max(6.0, font_size * 0.85)))
+        if len(text) <= max_chars:
+            return text
+        lines = textwrap.wrap(
+            text, width=max_chars, break_long_words=True,
+            break_on_hyphens=False,
+        )
+        if len(lines) > 2:
+            lines = [lines[0], ' '.join(lines[1:])]
+        return '<br>'.join(lines[:2])
 
     def _configure_preview_plot(
         self, plot, module, title='', x='', y='', compact=False
     ):
         font = module.get('font_family', 'Arial')
-        export_title_size = int(module.get('title_size', 7))
-        export_label_size = int(module.get('label_size', 7))
-        export_tick_size = int(module.get('tick_size', 7))
-        if compact:
-            title_size, label_size, tick_size = 10, 9, 8
-        else:
-            title_size = max(16, round(export_title_size * 2.2))
-            label_size = max(14, round(export_label_size * 1.9))
-            tick_size = max(12, round(export_tick_size * 1.7))
+        title_size, label_size, tick_size = self._preview_font_sizes(
+            module, compact=compact
+        )
+        title = self._wrap_preview_text(title, title_size)
+        x = self._wrap_preview_text(x, label_size)
         plot.setTitle(
             title, color='#202020', size=f'{title_size}pt',
             **{'font-family': font},
@@ -1016,8 +1237,8 @@ class PlotSettingsDialog(QDialog):
         plot.showGrid(x=bool(module.get('grid')), y=bool(module.get('grid')),
                       alpha=0.22)
         plot.getViewBox().setMouseEnabled(x=True, y=True)
-        plot.showAxis('top', bool(module.get('top_spine', False)))
-        plot.showAxis('right', bool(module.get('right_spine', False)))
+        plot.showAxis('top', True)
+        plot.showAxis('right', True)
         plot.setLogMode(
             x=module.get('x_scale') == 'log',
             y=module.get('current_scale') == 'log',
@@ -1100,10 +1321,11 @@ class PlotSettingsDialog(QDialog):
                 legend.anchor(item_pos, parent_pos, offset=offset)
 
     def _render_overview(self):
+        self._preview_panel_count = len(MODULE_NAMES)
         t = np.linspace(0, 6, 240)
         gate, transfer = self._transfer_example()
         for index, (module_id, name) in enumerate(MODULE_NAMES.items()):
-            plot = self.preview_widget.addPlot(row=index // 3, col=index % 3)
+            plot = self.preview_widget.addPlot(row=index // 4, col=index % 4)
             module = self._module_values[module_id]
             self._configure_preview_plot(plot, module, name, compact=True)
             primary = module.get('primary_color') or '#1565C0'
@@ -1134,26 +1356,41 @@ class PlotSettingsDialog(QDialog):
                 drive = np.where(t % 1.5 < .75, .8, -.2)
                 plot.plot(t, drive, pen=pen2)
                 plot.plot(t, .2 + .6/(1+np.exp(-5*drive)), pen=pen1)
+        self._set_preview_grid(2, 4)
 
-    def _render_preview(self):
-        if not hasattr(self, 'preview_widget'):
+    def _set_preview_grid(self, rows, columns):
+        layout = self.preview_widget.ci.layout
+        for row in range(rows):
+            layout.setRowStretchFactor(row, 1)
+        for column in range(columns):
+            layout.setColumnStretchFactor(column, 1)
+
+    def _render_preview(self, module_id=None):
+        if not hasattr(self, 'preview_stack'):
             return
-        self.preview_widget.setUpdatesEnabled(False)
+        if module_id is None and self._current_nav_key != '__unset__':
+            module_id = self._current_module_id
+        page = self._preview_pages[module_id]
+        target = page.inactive_canvas()
+        self.preview_widget = target
+        target.setUpdatesEnabled(False)
         try:
-            self._render_preview_content()
+            self._render_preview_content(module_id)
+            target.fit_contents()
         finally:
-            self.preview_widget.setUpdatesEnabled(True)
-            self.preview_widget.update()
+            target.setUpdatesEnabled(True)
+            target.update()
+        page.show_inactive_canvas()
+        self.preview_widget = page.current_canvas()
+        self._preview_dirty.discard(module_id)
 
-    def _render_preview_content(self):
+    def _render_preview_content(self, module_id):
         if not hasattr(self, 'preview_widget'):
             return
         self.preview_widget.clear()
-        if self._current_module_id is None:
+        if module_id is None:
             self._render_overview()
             return
-        self._save_current_module()
-        module_id = self._current_module_id
         module = self._module_values[module_id]
         primary = module.get('primary_color') or '#1565C0'
         secondary = module.get('secondary_color') or '#D32F2F'
@@ -1163,6 +1400,7 @@ class PlotSettingsDialog(QDialog):
         title = module.get('title', '')
 
         if module_id == 'break_junction':
+            self._preview_panel_count = 2
             v = np.linspace(.005, .5, 320)
             g = np.exp(-7.2*v) * (1 + .08*np.sin(55*v))
             g[v > .20] *= .48
@@ -1179,6 +1417,7 @@ class PlotSettingsDialog(QDialog):
             self._configure_preview_plot(
                 bottom, module, '', 'Voltage (V)', 'Conductance (G₀)'
             )
+            self._set_preview_grid(2, 1)
         elif module_id == 'iv_curve':
             v = np.linspace(-.22, .22, 320)
             gates = (-.6, 0, .6)
@@ -1186,6 +1425,11 @@ class PlotSettingsDialog(QDialog):
             gate_mode = module.get('iv_gate_mode', 'per_gate')
             file_mode = module.get('iv_file_mode', 'group')
             cycle_overlay = module.get('iv_cycle_mode') == 'overlay'
+            self._preview_panel_count = (
+                2 if file_mode == 'separate'
+                else 3 if gate_mode == 'small_multiples'
+                else 1
+            )
 
             def add_iv_curves(plot, gate_indices, segment='both'):
                 for index in gate_indices:
@@ -1253,11 +1497,16 @@ class PlotSettingsDialog(QDialog):
                 self._configure_preview_plot(
                     plot, module, title, x_label, y_label
                 )
+            self._set_preview_grid(
+                1 if file_mode == 'separate' else 3 if gate_mode == 'small_multiples' else 1,
+                2 if file_mode == 'separate' else 1,
+            )
         elif module_id == 'isd_vg_setvsd':
             gate, base = self._transfer_example()
             curves = [base*(.76+.16*i) + .04*i for i in range(4)]
             colors = _module_palette(module, len(curves))
-            mode = module.get('isd_mode', 'overlay')
+            mode = module.get('isd_mode', 'stacked')
+            self._preview_panel_count = 4 if mode == 'stacked' else 1
             if mode == 'stacked':
                 previous = None
                 for i, curve in enumerate(curves):
@@ -1289,29 +1538,88 @@ class PlotSettingsDialog(QDialog):
                         module.get('y_label'), 'Current', 'nA'
                     ),
                 )
+            self._set_preview_grid(4 if mode == 'stacked' else 1, 1)
         elif module_id == 'mapping_scan':
+            self._preview_panel_count = 1
             plot = self.preview_widget.addPlot()
-            gate = np.linspace(-1.6, 1.6, 180)
-            bias = np.linspace(-120, 120, 140)
-            x, y = np.meshgrid(gate, bias/120)
+            gate = np.linspace(-5, 5, 180)
+            bias = np.linspace(-20, 20, 140)
+            x, y = np.meshgrid(gate / 3.0, bias / 20.0)
             threshold = .16+.7*(1-np.abs(((x+.4) % .8)-.4)/.4)
             didv = .06+1.5/(1+np.exp(-(np.abs(y)-threshold)/.045))
             image = pg.ImageItem(didv.T)
             image.setRect(QRectF(gate.min(), bias.min(),
                                  np.ptp(gate), np.ptp(bias)))
+            low, high = np.nanpercentile(didv, [0.5, 99.5])
+            image.setLevels((float(low), float(high)))
             try:
-                image.setColorMap(pg.colormap.get(
-                    module.get('colormap', 'viridis'), source='matplotlib'
-                ))
+                cmap_name = module.get('colormap', 'RdBu_r')
+                if cmap_name in (
+                    'viridis', 'plasma', 'inferno', 'magma', 'cividis', 'turbo'
+                ):
+                    cmap_name = 'RdBu_r'
+                color_map = pg.colormap.get(cmap_name, source='matplotlib')
             except Exception:
-                pass
+                color_map = pg.colormap.get('RdBu_r', source='matplotlib')
+            image.setColorMap(color_map)
             plot.addItem(image)
             self._configure_preview_plot(
                 plot, module, title + ' — Differential conductance preview',
                 module.get('x_label') or 'Gate voltage (V)',
                 module.get('y_label') or 'Bias voltage (mV)',
             )
+            plot.setXRange(float(gate.min()), float(gate.max()), padding=0)
+            plot.setYRange(float(bias.min()), float(bias.max()), padding=0)
+            plot.getAxis('bottom').setTicks([[
+                (value, f'{value:g}') for value in np.linspace(-5, 5, 5)
+            ]])
+            plot.getAxis('left').setTicks([[
+                (value, f'{value:g}') for value in np.linspace(-20, 20, 5)
+            ]])
+            colorbar = self.preview_widget.addPlot(row=0, col=1)
+            gradient = pg.ImageItem(
+                np.linspace(low, high, 256, dtype=float).reshape(1, -1)
+            )
+            gradient.setRect(QRectF(0, float(low), 1, float(high - low)))
+            gradient.setLevels((float(low), float(high)))
+            gradient.setColorMap(color_map)
+            colorbar.addItem(gradient)
+            colorbar.setMouseEnabled(x=False, y=False)
+            colorbar.getViewBox().setBackgroundColor('#FFFFFF')
+            colorbar.setXRange(0, 1, padding=0)
+            colorbar.setYRange(float(low), float(high), padding=0)
+            colorbar.showAxis('top', True)
+            colorbar.showAxis('right', True)
+            colorbar.setLabel(
+                'right', 'Differential conductance (µS)',
+                **{
+                    'font-family': module.get('font_family', 'Arial'),
+                    'font-size': f'{self._preview_font_sizes(module)[1]}pt',
+                },
+            )
+            frame_pen = pg.mkPen('#707070', width=max(
+                1.0, float(module.get('tick_width', 0.8)) * 1.5
+            ))
+            for axis_name in ('bottom', 'left', 'top', 'right'):
+                axis = colorbar.getAxis(axis_name)
+                axis.setPen(frame_pen)
+                axis.setTickPen(frame_pen)
+                axis.setStyle(
+                    showValues=axis_name == 'right',
+                    tickLength=-5 if axis_name == 'right' else 0,
+                )
+                axis.setTickFont(QFont(
+                    module.get('font_family', 'Arial'),
+                    self._preview_font_sizes(module)[2],
+                ))
+            colorbar.getAxis('right').setTicks([[
+                (float(value), f'{value:.2g}')
+                for value in np.linspace(low, high, 5)
+            ]])
+            self._set_preview_grid(1, 2)
+            self.preview_widget.ci.layout.setColumnFixedWidth(1, 118)
         elif module_id == 'it_step_setgate':
+            self._preview_panel_count = 2
             t = np.linspace(0, 12, 1200)
             raw = .62 + np.where(t % 2.8 > 1.45, .22, 0)
             raw += .045*np.sin(2*np.pi*8*t)+.018*np.sin(2*np.pi*37*t)
@@ -1335,7 +1643,13 @@ class PlotSettingsDialog(QDialog):
                 right, module, 'Current distribution',
                 'Probability density', 'Current (nA)'
             )
+            right.setYLink(left)
+            right.setLabel('left', '')
+            right.getAxis('left').setStyle(showValues=False)
+            right.getAxis('left').setWidth(12)
+            self._set_preview_grid(1, 2)
         elif module_id == 'arbitrary_gate':
+            self._preview_panel_count = 2
             t = np.linspace(0, 6, 900)
             drive = np.select(
                 [t < 1, t < 2.4, t < 3.2, t < 4.8],
@@ -1354,7 +1668,9 @@ class PlotSettingsDialog(QDialog):
             self._configure_preview_plot(
                 bottom, module, '', 'Time (s)', 'Bias current (nA)'
             )
+            self._set_preview_grid(2, 1)
         else:
+            self._preview_panel_count = 2
             t = np.linspace(0, 6, 900)
             drive = np.select(
                 [t < 1, t < 2.4, t < 3.2, t < 4.8],
@@ -1373,11 +1689,13 @@ class PlotSettingsDialog(QDialog):
             self._configure_preview_plot(
                 bottom, module, '', 'Time (s)', 'Current (nA)'
             )
+            self._set_preview_grid(2, 1)
 
     def _restore_defaults(self):
         defaults = default_plot_settings()
         self._initial = defaults
         self._module_values = copy.deepcopy(defaults['modules'])
+        self._preview_dirty = {None, *MODULE_NAMES.keys()}
         self.cb_auto.setChecked(defaults['auto_plot'])
         self.cb_partial.setChecked(defaults['plot_partial'])
         self.cb_preview.setChecked(defaults['show_preview'])
@@ -1483,6 +1801,7 @@ class PlotSettingsDialog(QDialog):
             return
         self._initial = value
         self._module_values = copy.deepcopy(value['modules'])
+        self._preview_dirty = {None, *MODULE_NAMES.keys()}
         self.cb_auto.setChecked(bool(value['auto_plot']))
         self.cb_partial.setChecked(bool(value['plot_partial']))
         self.cb_preview.setChecked(bool(value['show_preview']))
@@ -1527,14 +1846,45 @@ class PlotPreviewDialog(QDialog):
         self.setWindowTitle('绘图结果')
         self.resize(1000, 760)
         layout = QVBoxLayout(self)
-        tabs = QTabWidget()
-        layout.addWidget(tabs)
+        self.tabs = QTabWidget()
+        valid_count = 0
+        failed = []
         for path in image_paths:
             label = _FitPixmapLabel(str(path))
-            tabs.addTab(label, Path(path).name)
+            if label.has_valid_image():
+                self.tabs.addTab(label, Path(path).name)
+                valid_count += 1
+            else:
+                failed.append(Path(path).name)
+        if valid_count:
+            layout.addWidget(self.tabs)
+            self.tabs.currentChanged.connect(self._refresh_current_image)
+        else:
+            message = QLabel(
+                '无法读取绘图图片。'
+                + (f"\n{', '.join(failed)}" if failed else '')
+            )
+            message.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            message.setWordWrap(True)
+            layout.addWidget(message)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        QTimer.singleShot(0, self._refresh_current_image)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._refresh_current_image)
+
+    def _refresh_current_image(self, *_args):
+        if not hasattr(self, 'tabs'):
+            return
+        label = self.tabs.currentWidget()
+        if isinstance(label, _FitPixmapLabel):
+            label.update_scaled_pixmap()
 
 
 class _FitPixmapLabel(QLabel):
@@ -1544,22 +1894,39 @@ class _FitPixmapLabel(QLabel):
         super().__init__(parent)
         self._source_pixmap = QPixmap(str(path))
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setMargin(10)
+        self.setStyleSheet(
+            'QLabel {'
+            'background-color: #E8EAED;'
+            'border: 1px solid #B8BDC5;'
+            '}'
+        )
         self.setSizePolicy(
             QSizePolicy.Policy.Ignored,
             QSizePolicy.Policy.Ignored,
         )
         self.setMinimumSize(240, 180)
-        self._update_scaled_pixmap()
+        self.update_scaled_pixmap()
+
+    def has_valid_image(self):
+        return not self._source_pixmap.isNull()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self._update_scaled_pixmap()
+        self.update_scaled_pixmap()
 
-    def _update_scaled_pixmap(self):
+    def showEvent(self, event):
+        super().showEvent(event)
+        QTimer.singleShot(0, self.update_scaled_pixmap)
+
+    def update_scaled_pixmap(self):
         if self._source_pixmap.isNull() or self.width() <= 0 or self.height() <= 0:
             return
+        target = self.contentsRect().size()
+        target.setWidth(max(1, target.width() - 20))
+        target.setHeight(max(1, target.height() - 20))
         self.setPixmap(self._source_pixmap.scaled(
-            self.size(),
+            target,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         ))
@@ -1632,29 +1999,70 @@ def _load_numeric(path):
     return data
 
 
-def _output_directory(result, settings):
+def _output_directory(result, settings, paths):
+    data_root_value = str(result.get('data_root') or '').strip()
+    data_root = Path(data_root_value).resolve() if data_root_value else None
     if (
         settings['output_mode'] == 'custom'
         and str(settings.get('output_folder', '')).strip()
     ):
-        output = Path(settings['output_folder'])
+        figure_root = Path(settings['output_folder']).expanduser().resolve()
     else:
-        paths = [Path(path).resolve() for path in result['data_files']]
-        common = Path(os.path.commonpath([str(path.parent) for path in paths]))
-        if common.name in ('pos', 'full'):
-            common = common.parent
-        output = common / 'plots'
+        if data_root is None:
+            common_parent = Path(os.path.commonpath([
+                str(path.resolve().parent) for path in paths
+            ]))
+            data_root = common_parent.parent
+        figure_root = data_root / 'figures'
+
+    relative_parent = None
+    if data_root is not None:
+        try:
+            relative_parents = [
+                path.resolve().parent.relative_to(data_root)
+                for path in paths
+            ]
+            relative_parent = Path(os.path.commonpath([
+                str(parent) for parent in relative_parents
+            ]))
+        except (ValueError, OSError):
+            relative_parent = None
+    if relative_parent is None or str(relative_parent) in ('', '.'):
+        relative_parent = Path(
+            MODULE_FOLDERS.get(
+                result.get('module_id'), result.get('module_id', '')
+            )
+        )
+    if (
+        result.get('module_id') == 'mapping_scan'
+        and relative_parent.name in ('pos', 'full')
+    ):
+        relative_parent = relative_parent.parent
+    output = figure_root / relative_parent
     output.mkdir(parents=True, exist_ok=True)
     return output
 
 
-def _unique_output(folder, stem, suffix):
-    candidate = folder / f'{stem}.{suffix}'
-    index = 1
-    while candidate.exists():
-        candidate = folder / f'{stem}_{index:03d}.{suffix}'
-        index += 1
-    return candidate
+def _aggregate_output_stem(result, paths, partial=False):
+    prefix = str(result.get('save_prefix') or '').strip()
+    if not prefix:
+        prefix = paths[0].stem
+        prefix = re.sub(r'_seg\d+(?=_backup\d{3}|_partial|$)', '', prefix)
+        prefix = re.sub(r'_Vg=.*$', '', prefix)
+    prefix = Path(prefix).stem
+    backup_tokens = {
+        match.group(0)
+        for path in paths
+        for match in [re.search(r'_backup\d{3}', path.stem)]
+        if match is not None
+    }
+    if len(backup_tokens) == 1:
+        token = next(iter(backup_tokens))
+        if token not in prefix:
+            prefix += token
+    if partial and not prefix.endswith('_partial'):
+        prefix += '_partial'
+    return prefix
 
 
 def _save_figure(fig, path, dpi):
@@ -1710,6 +2118,7 @@ def _apply_figure_style(fig, settings, partial=False):
     width = float(module.get('line_width', 0.8))
     marker = module.get('marker', 'none')
     background = '#FFFFFF'
+    frame_width = float(module.get('tick_width', 0.8))
     fig.patch.set_facecolor(background)
     data_axes = [
         axis for axis in fig.axes if axis.get_label() != '<colorbar>'
@@ -1732,10 +2141,13 @@ def _apply_figure_style(fig, settings, partial=False):
             labelsize=module.get('tick_size', 6),
             direction=module.get('tick_direction', 'out'),
             length=module.get('tick_length', 3.0),
-            width=module.get('tick_width', 0.6),
+            width=frame_width,
+            top=False,
+            right=False,
         )
-        axis.spines['top'].set_visible(bool(module.get('top_spine', False)))
-        axis.spines['right'].set_visible(bool(module.get('right_spine', False)))
+        for spine in axis.spines.values():
+            spine.set_visible(True)
+            spine.set_linewidth(frame_width)
         if module.get('minor_ticks'):
             axis.minorticks_on()
         for label in axis.get_xticklabels() + axis.get_yticklabels():
@@ -1745,6 +2157,8 @@ def _apply_figure_style(fig, settings, partial=False):
             for text in legend.get_texts():
                 text.set_fontfamily(font)
                 text.set_fontsize(module.get('tick_size', 6))
+                text.set_fontweight('normal')
+            legend.set_frame_on(False)
             legend.set_visible(bool(module.get('legend', True)))
     custom_title = str(module.get('title', '')).strip()
     if custom_title:
@@ -1774,7 +2188,7 @@ def _save_all_formats(fig, folder, stem, module):
     outputs = []
     formats = module.get('formats') or ['png']
     for suffix in formats:
-        path = _unique_output(folder, stem, suffix)
+        path = folder / f'{stem}.{suffix}'
         _save_figure(fig, path, int(module.get('dpi', 300)))
         outputs.append(str(path))
     return outputs
@@ -1864,17 +2278,23 @@ def _iv_curve_label(
     return ', '.join(parts)
 
 
-def _symmetric_norm(values):
+def _mapping_norm(values, signed=False):
+    """Return a robust, physically meaningful blue-white-red normalization."""
     array = np.asarray(values, dtype=float)
-    finite = np.abs(array[np.isfinite(array)])
+    finite = array[np.isfinite(array)]
     if not finite.size:
         return None
-    limit = float(np.nanpercentile(finite, 99.5))
-    if limit <= 0:
-        limit = float(np.max(finite))
-    if limit <= 0:
-        return None
-    return TwoSlopeNorm(vmin=-limit, vcenter=0.0, vmax=limit)
+    low, high = np.nanpercentile(finite, [0.5, 99.5])
+    if signed or (low < 0 < high):
+        limit = float(np.nanpercentile(np.abs(finite), 99.5))
+        if limit > 0:
+            return TwoSlopeNorm(vmin=-limit, vcenter=0.0, vmax=limit)
+    if not np.isfinite(low) or not np.isfinite(high) or high <= low:
+        low = float(np.min(finite))
+        high = float(np.max(finite))
+    if high <= low:
+        high = low + max(abs(low) * 1e-9, 1e-12)
+    return Normalize(vmin=float(low), vmax=float(high), clip=False)
 
 
 def _histogram_bins(values, module):
@@ -1918,12 +2338,10 @@ def render_result(result, settings):
     ]
     if not paths:
         raise ValueError('本次测试没有可读取的数据文件')
-    output = _output_directory(result, settings)
+    output = _output_directory(result, settings, paths)
     partial = result.get('status') == 'partial'
     status = ' — PARTIAL' if partial else ''
-    stem_base = f"{module_id}_{result.get('run_id', 'latest')}"
-    if partial:
-        stem_base += '_partial'
+    stem_base = _aggregate_output_stem(result, paths, partial=partial)
     outputs = []
 
     if module_id == 'mapping_scan':
@@ -1962,12 +2380,12 @@ def render_result(result, settings):
             smooth = current.copy()
         didv = np.gradient(smooth, bias, axis=1)
         mapping_sets = (
-            ('raw_current_mapping', current * 1e9,
+            (f'{stem_base}_raw_current_mapping', current * 1e9,
              'Raw current', 'Current (nA)', True),
-            ('smoothed_current_mapping', smooth * 1e9,
+            (f'{stem_base}_smoothed_current_mapping', smooth * 1e9,
              'Smoothed current', 'Current (nA)', True),
-            ('differential_conductance_mapping', didv * 1e6,
-             'Differential conductance', 'Differential conductance (µS)', True),
+            (f'{stem_base}_differential_conductance_mapping', didv * 1e6,
+             'Differential conductance', 'Differential conductance (µS)', False),
         )
         gate_scaled, gate_unit, _gate_factor = _engineering_voltage(gate)
         bias_scaled, bias_unit, _bias_factor = _engineering_voltage(bias)
@@ -1975,12 +2393,13 @@ def render_result(result, settings):
             fig = _new_figure(module)
             axis = fig.subplots()
             cmap = module.get('colormap', 'RdBu_r')
-            if centered and cmap in ('viridis', 'plasma', 'inferno', 'magma'):
+            if cmap in ('viridis', 'plasma', 'inferno', 'magma', 'cividis', 'turbo'):
                 cmap = 'RdBu_r'
+            norm = _mapping_norm(values, signed=centered)
             mesh = axis.pcolormesh(
                 gate_scaled, bias_scaled, values.T, shading='auto',
                 cmap=cmap,
-                norm=_symmetric_norm(values) if centered else None,
+                norm=norm,
             )
             axis.set_ylim(
                 float(np.min(bias_scaled)), float(np.max(bias_scaled))
@@ -1992,20 +2411,24 @@ def render_result(result, settings):
                 _label_with_unit(module.get('y_label'), 'Bias voltage', bias_unit)
             )
             axis.set_title(f'{plot_title}{status}')
-            colorbar = fig.colorbar(mesh, ax=axis)
+            colorbar = fig.colorbar(mesh, ax=axis, extend='both')
             colorbar.set_label(color_label)
             colorbar_formatter = ScalarFormatter(useOffset=False)
             colorbar_formatter.set_scientific(False)
             colorbar.formatter = colorbar_formatter
+            colorbar.locator = MaxNLocator(nbins=5)
             colorbar.update_ticks()
             _decorate_axis(axis, settings)
+            axis.xaxis.set_major_locator(MaxNLocator(nbins=6))
+            axis.yaxis.set_major_locator(MaxNLocator(nbins=6))
             _apply_figure_style(fig, settings, partial=partial)
+            colorbar.outline.set_linewidth(float(module.get('tick_width', 0.8)))
             axis.set_title(f'{plot_title}{status}')
             outputs.extend(_save_all_formats(
-                fig, output, stem + ('_partial' if partial else ''), module
+                fig, output, stem, module
             ))
         if module.get('mapping_full_iv', True):
-            iv_folder = output / 'mapping' / 'full_iv'
+            iv_folder = output / 'full'
             iv_folder.mkdir(parents=True, exist_ok=True)
             _scaled, iv_unit, iv_factor = _engineering_current(
                 np.concatenate([item[2] for item in datasets])
@@ -2038,7 +2461,7 @@ def render_result(result, settings):
                 _apply_figure_style(summary_fig, settings, partial=partial)
                 summary_axis.set_title(f'Full current–voltage curves{status}')
                 outputs.extend(_save_all_formats(
-                    summary_fig, iv_folder, 'full_iv_summary', module
+                    summary_fig, iv_folder, f'{stem_base}_full_iv_summary', module
                 ))
         return outputs
 
@@ -2067,7 +2490,7 @@ def render_result(result, settings):
             _decorate_axis(axis, settings, current_axis=axis is axes[0])
         fig.suptitle(module.get('title', 'Break junction') + status)
         _apply_figure_style(fig, settings, partial=partial)
-        return _save_all_formats(fig, output, stem_base, module)
+        return _save_all_formats(fig, output, paths[0].stem, module)
 
     if module_id == 'iv_curve':
         valid = []
@@ -2151,14 +2574,10 @@ def render_result(result, settings):
                     axis.set_title(gate_item[3])
                 _decorate_axis(axis, settings, current_axis=True)
                 if module.get('legend') and len(group_data) <= 20:
-                    location = module.get('legend_location', 'best')
-                    if location == 'best' and len(group_data) > 1:
-                        axis.legend(
-                            loc='upper center', bbox_to_anchor=(0.5, -0.19),
-                            ncol=2, frameon=False,
-                        )
-                    else:
-                        axis.legend(loc=location)
+                    axis.legend(
+                        loc=module.get('legend_location', 'upper left'),
+                        frameon=False,
+                    )
             axes[-1].set_xlabel(
                 _label_with_unit(module.get('x_label'), 'Bias voltage', bias_unit)
             )
@@ -2193,7 +2612,7 @@ def render_result(result, settings):
         _gate_scaled, gate_unit, gate_factor = _engineering_voltage(
             np.concatenate([item[1] for item in curves])
         )
-        mode = module.get('isd_mode', 'overlay')
+        mode = module.get('isd_mode', 'stacked')
         colors = _module_palette(module, len(curves))
         if mode == 'stacked':
             fig = _new_figure(module)
@@ -2257,7 +2676,7 @@ def render_result(result, settings):
         return _save_all_formats(fig, output, stem_base, module)
 
     if module_id == 'it_step_setgate':
-        for file_index, path in enumerate(paths, 1):
+        for path in paths:
             data = _load_numeric(path)
             if data.shape[1] < 3:
                 raise ValueError(f'It 数据列不足：{path.name}')
@@ -2307,7 +2726,7 @@ def render_result(result, settings):
             )
             axes[0].text(
                 0.02, 0.98, statistics_text, transform=axes[0].transAxes,
-                va='top', ha='left', fontsize=module.get('tick_size', 7),
+                va='top', ha='left', fontsize=module.get('tick_size', 6),
                 bbox={
                     'facecolor': 'white', 'edgecolor': '#BBBBBB',
                     'alpha': 0.85,
@@ -2317,10 +2736,7 @@ def render_result(result, settings):
                 _decorate_axis(axis, settings, current_axis=True)
             fig.suptitle(module.get('title', '') + status)
             _apply_figure_style(fig, settings, partial=partial)
-            stem = (
-                stem_base if len(paths) == 1
-                else f'{stem_base}_{file_index:03d}'
-            )
+            stem = path.stem
             outputs.extend(_save_all_formats(fig, output, stem, module))
         return outputs
 
@@ -2350,7 +2766,7 @@ def render_result(result, settings):
         _decorate_axis(axes[1], settings, current_axis=True)
         fig.suptitle(module.get('title', '') + status)
         _apply_figure_style(fig, settings, partial=partial)
-        return _save_all_formats(fig, output, stem_base, module)
+        return _save_all_formats(fig, output, paths[0].stem, module)
 
     axes = fig.subplots(2, 1, sharex=True)
     if module_id == 'arbitrary_bias':
@@ -2378,4 +2794,4 @@ def render_result(result, settings):
     _decorate_axis(axes[1], settings, current_axis=True)
     fig.suptitle(module.get('title', '') + status)
     _apply_figure_style(fig, settings, partial=partial)
-    return _save_all_formats(fig, output, stem_base, module)
+    return _save_all_formats(fig, output, paths[0].stem, module)

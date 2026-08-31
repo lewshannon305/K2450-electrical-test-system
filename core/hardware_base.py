@@ -23,6 +23,8 @@ NPLC_MIN = 0.01
 NPLC_MAX = 10.0
 MAX_2450_SOURCE_VOLTAGE = 210.0
 SUPPORTED_2450_VOLTAGE_RANGES = (0.2, 2.0, 20.0, 200.0)
+GATE_CURRENT_RANGE_A = 10e-9
+GATE_CURRENT_LIMIT_DEFAULT_A = 1e-9
 
 
 class MeasurementReadError(RuntimeError):
@@ -31,6 +33,10 @@ class MeasurementReadError(RuntimeError):
 
 class InstrumentConfigurationError(RuntimeError):
     """The instrument rejected or did not apply the requested configuration."""
+
+
+class GateCurrentLimitError(RuntimeError):
+    """Gate current reached the user-selected safety limit."""
 
 
 def validate_2450_idn(idn):
@@ -73,6 +79,37 @@ def validate_current_range_limit(current_range, current_limit, label='电流'):
             f'当前限流 {limit:g} A；程序不会自动修改量程或限流'
         )
     return matched_range, limit
+
+
+def validate_gate_current_limit(current_limit, label='栅极'):
+    """Validate gate compliance against the fixed 10 nA measurement range."""
+    _range, limit = validate_current_range_limit(
+        GATE_CURRENT_RANGE_A, current_limit, label
+    )
+    return limit
+
+
+def check_gate_current_limit(current, current_limit):
+    current_value = float(current)
+    limit = validate_gate_current_limit(current_limit)
+    if abs(current_value) >= limit:
+        raise GateCurrentLimitError(
+            f'栅电流达到保护限值：|Ig| = {abs(current_value):.6e} A，'
+            f'限值 = {limit:.6e} A'
+        )
+    return current_value
+
+
+def gate_safety_metadata(
+    voltage_range, current_limit, software_monitoring, tripped=False
+):
+    return {
+        'gate_voltage_range_V': validate_voltage_range(voltage_range),
+        'gate_current_range_A': GATE_CURRENT_RANGE_A,
+        'gate_current_limit_A': validate_gate_current_limit(current_limit),
+        'gate_software_monitoring': bool(software_monitoring),
+        'gate_current_limit_tripped': bool(tripped),
+    }
 
 
 def validate_nplc(value, label='NPLC'):
@@ -280,6 +317,19 @@ def validate_voltage_within_range(
     return actual_voltage, actual_range
 
 
+def validate_gate_voltage_within_range(voltage, voltage_range, label='栅压'):
+    actual_voltage = validate_source_voltage(voltage, label)
+    actual_range = validate_voltage_range(voltage_range, '栅压量程')
+    if abs(actual_voltage) > actual_range and not math.isclose(
+        abs(actual_voltage), actual_range, rel_tol=1e-9
+    ):
+        raise ValueError(
+            f'{label} {actual_voltage:g} V 超出栅压量程 '
+            f'±{actual_range:g} V；程序不会自动改变量程'
+        )
+    return actual_voltage, actual_range
+
+
 def clear_scpi_status(instrument):
     instrument.write('*CLS')
 
@@ -395,6 +445,67 @@ def verify_current_configuration(
     }
 
 
+def verify_voltage_range_configuration(instrument, voltage_range, label='仪器'):
+    expected = validate_voltage_range(voltage_range, f'{label}电压量程')
+    actual = _query_float(instrument, ':SOUR:VOLT:RANG?', f'{label}电压量程')
+    if not math.isclose(actual, expected, rel_tol=1e-6, abs_tol=expected * 1e-9):
+        raise InstrumentConfigurationError(
+            f'{label}电压量程未生效：请求 {expected:g} V，回读 {actual:g} V'
+        )
+    assert_no_scpi_errors(instrument, f'{label}电压量程配置')
+    return actual
+
+
+def configure_gate_meter(
+    instrument,
+    *,
+    voltage_range,
+    current_limit,
+    nplc,
+    terminal,
+    autozero_mode='continuous',
+    label='栅压表',
+):
+    """Configure and verify the shared gate-meter safety settings."""
+    voltage_range = validate_voltage_range(voltage_range, f'{label}电压量程')
+    current_limit = validate_gate_current_limit(current_limit, label)
+    validate_nplc(nplc, f'{label} NPLC')
+    terminal = validate_terminal(terminal, f'{label}端子')
+    instrument.write('*RST')
+    clear_scpi_status(instrument)
+    instrument.write(':ABORt')
+    instrument.write(':SOUR:FUNC VOLT')
+    instrument.write(':SENS:FUNC "CURR"')
+    instrument.write(':SENS:CURR:RSEN OFF')
+    instrument.write(f':ROUT:TERM {terminal}')
+    instrument.write(':SENS:CURR:AVER OFF')
+    instrument.write(':SOUR:VOLT:READ:BACK ON')
+    instrument.write(f':SENS:CURR:NPLC {float(nplc):.12g}')
+    configure_current_autozero(instrument, autozero_mode)
+    instrument.write(':SENS:CURR:RANG:AUTO OFF')
+    instrument.write(f':SENS:CURR:RANG {GATE_CURRENT_RANGE_A:.12g}')
+    instrument.write(f':SOUR:VOLT:ILIM {current_limit:.12g}')
+    instrument.write(f':SOUR:VOLT:RANG {voltage_range:.12g}')
+    instrument.write(':SOUR:VOLT 0')
+    time.sleep(0.05)
+    current_settings = verify_current_configuration(
+        instrument,
+        nplc=nplc,
+        current_range=GATE_CURRENT_RANGE_A,
+        current_limit=current_limit,
+        terminal=terminal,
+        autozero_mode=autozero_mode,
+        label=label,
+    )
+    actual_voltage_range = verify_voltage_range_configuration(
+        instrument, voltage_range, label
+    )
+    return {
+        **current_settings,
+        'voltage_range_V': actual_voltage_range,
+    }
+
+
 def configure_current_autozero(instrument, mode):
     """Configure Model 2450 current autozero without relying on *RST defaults."""
     if mode == 'continuous':
@@ -438,6 +549,23 @@ def reliable_output_off(instrument, label='仪器'):
     except Exception as exc:
         failures.append(f'无法回读输出状态: {exc}')
     return confirmed, failures
+
+
+def shutdown_report_confirmed(report):
+    """Return True when cleanup reached confirmed 0 V with output disabled."""
+    if not isinstance(report, dict):
+        return False
+    if report.get('status') not in ('complete', 'emergency_off'):
+        return False
+    if not report.get('output_off_confirmed'):
+        return False
+    zero_readback = report.get('zero_readback')
+    return (
+        zero_readback is not None
+        and math.isclose(
+            float(zero_readback), 0.0, rel_tol=0.0, abs_tol=1e-9
+        )
+    )
 
 
 def generate_exact_ramp_levels(current, target, max_step):
@@ -752,16 +880,24 @@ def allocate_unique_path(folder, filename):
     requested = folder_path / filename
     stem = requested.stem
     suffix = requested.suffix
+    partial_marker = '_partial' if stem.endswith('_partial') else ''
+    base_stem = stem[:-len(partial_marker)] if partial_marker else stem
     candidate = requested
     index = 1
     while True:
         reservation = candidate.with_name(f'.{candidate.name}.reserve')
+        candidate_stem = candidate.stem
+        if candidate_stem.endswith('_partial'):
+            paired_stem = candidate_stem[:-len('_partial')]
+        else:
+            paired_stem = candidate_stem + '_partial'
         occupied = (
             candidate.exists()
             or reservation.exists()
             or result_metadata_path(candidate).exists()
-            or candidate.with_name(
-                candidate.stem + '_partial' + candidate.suffix
+            or candidate.with_name(paired_stem + candidate.suffix).exists()
+            or result_metadata_path(
+                candidate.with_name(paired_stem + candidate.suffix)
             ).exists()
         )
         if not occupied:
@@ -775,7 +911,9 @@ def allocate_unique_path(folder, filename):
             else:
                 os.close(descriptor)
                 return candidate
-        candidate = folder_path / f'{stem}_{index:03d}{suffix}'
+        candidate = folder_path / (
+            f'{base_stem}_backup{index:03d}{partial_marker}{suffix}'
+        )
         index += 1
 
 

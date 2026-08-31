@@ -17,16 +17,21 @@ from PyQt6.QtWidgets import QApplication, QFrame, QGroupBox, QLabel
 
 from core.hardware_base import (
     InstrumentConfigurationError,
+    GateCurrentLimitError,
     MeasurementReadError,
     allocate_unique_path,
     assert_no_scpi_errors,
     atomic_text_writer,
+    check_gate_current_limit,
+    configure_gate_meter,
     fast_shutdown_zero_2450,
     generate_exact_ramp_levels,
     reliable_output_off,
+    shutdown_report_confirmed,
     required_float_query,
     validate_2450_idn,
     validate_current_range_limit,
+    validate_gate_current_limit,
     validate_distinct_addresses,
     validate_nplc,
     validate_positive_step,
@@ -35,6 +40,7 @@ from core.hardware_base import (
     validate_step_divides_interval,
     validate_terminal,
     validate_voltage_range,
+    validate_gate_voltage_within_range,
     validate_voltage_within_range,
     verify_current_configuration,
     write_result_metadata,
@@ -51,7 +57,6 @@ from modules.isd_vg_setvsd import IsdVgMeasurement
 from modules.iv_curve import (
     IV_Measurement,
     IVWidget,
-    GateLeakageError,
     build_gate_targets,
     default_iv_gate_settings,
     merge_gate_settings_into_iv_params,
@@ -66,7 +71,9 @@ from main import MainWindow, WelcomePage, parse_config_modules
 from core.app_base import BaseAppWidget
 from core.instrument_config import InstrumentSettings
 from core.paths import resource_path
-from core.time_acquisition import InternalSegmentCollector, timing_metadata
+from core.time_acquisition import (
+    InternalSegmentCollector, RealtimeSampler, timing_metadata,
+)
 from core.ui_builder import create_status_group
 
 
@@ -182,6 +189,53 @@ class HardwareReliabilityTests(unittest.TestCase):
         self.assertEqual(validate_nplc(0.01), 0.01)
         with self.assertRaises(ValueError):
             validate_nplc(0.001)
+
+    def test_gate_meter_uses_fixed_10_na_range_and_readback(self):
+        instrument = FakeInstrument({
+            ':SENS:AZER:ONCE;*OPC?': '1',
+            ':SENS:CURR:NPLC?': '0.01',
+            ':SENS:CURR:RANG:AUTO?': '0',
+            ':SENS:CURR:RANG?': '1e-8',
+            ':SOUR:VOLT:ILIM?': '1e-9',
+            ':ROUT:TERM?': 'REAR',
+            ':SENS:CURR:AZER?': '0',
+            ':SOUR:VOLT:RANG?': '20',
+            ':SYST:ERR?': '0,"No error"',
+        })
+        settings = configure_gate_meter(
+            instrument,
+            voltage_range=20,
+            current_limit=1e-9,
+            nplc=0.01,
+            terminal='REAR',
+            autozero_mode='block_once',
+        )
+        self.assertEqual(settings['current_range_A'], 1e-8)
+        self.assertEqual(settings['voltage_range_V'], 20)
+        self.assertIn(':SENS:CURR:RANG:AUTO OFF', instrument.writes)
+        self.assertIn(':SENS:CURR:RANG 1e-08', instrument.writes)
+        self.assertIn(':SOUR:VOLT:ILIM 1e-09', instrument.writes)
+        self.assertIn(':SOUR:VOLT:RANG 20', instrument.writes)
+
+    def test_gate_limit_rejects_over_range_and_trips_at_equal_value(self):
+        self.assertEqual(validate_gate_current_limit(1e-9), 1e-9)
+        with self.assertRaises(ValueError):
+            validate_gate_current_limit(10.5001e-9)
+        with self.assertRaises(GateCurrentLimitError):
+            check_gate_current_limit(-1e-9, 1e-9)
+        self.assertEqual(validate_gate_voltage_within_range(20, 20), (20, 20))
+        with self.assertRaises(ValueError):
+            validate_gate_voltage_within_range(20.01, 20)
+
+    def test_realtime_sampler_uses_gate_limit_for_software_stop(self):
+        sampler = RealtimeSampler(
+            FakeInstrument({':READ?': '2e-6'}),
+            FakeInstrument({':READ?': '-1e-9'}),
+            0,
+            gate_current_limit=1e-9,
+        )
+        with self.assertRaises(GateCurrentLimitError):
+            sampler.sample()
 
 
 class FakeResourceManager:
@@ -469,7 +523,7 @@ class GlobalInstrumentSelectionTests(unittest.TestCase):
                     window.save_config()
                 self.assertTrue(config_path.is_file())
                 saved = json.loads(config_path.read_text(encoding='utf-8'))
-                self.assertEqual(saved['__schema_version__'], 3)
+                self.assertEqual(saved['__schema_version__'], 4)
                 self.assertEqual(saved['storage']['root'], str(data_root))
                 self.assertFalse(any(
                     call.args and call.args[0] == '错误'
@@ -590,7 +644,7 @@ class GlobalInstrumentSelectionTests(unittest.TestCase):
             self.assertNotIn('.txt', widgets[2].output_hint_label.text())
             for widget in widgets:
                 self.assertTrue(any(
-                    label.text() == '保存路径（根目录下）：'
+                    label.text() == '保存路径 (根目录下)：'
                     for label in widget.findChildren(QLabel)
                 ))
             self.assertNotIn('SETTLE_TIME', widgets[0].inputs)
@@ -622,8 +676,25 @@ class GlobalInstrumentSelectionTests(unittest.TestCase):
                 }
                 self.assertTrue(expected <= visible_text)
             self.assertEqual(widgets[5].inputs['b_range'].currentData(), 1e-6)
-            self.assertEqual(widgets[6].inputs['g_range'].currentData(), 1e-6)
+            self.assertNotIn('g_range', widgets[6].inputs)
+            self.assertEqual(widgets[6].inputs['g_voltage_range'].text(), '20')
             self.assertEqual(widgets[6].inputs['b_range'].currentData(), 1e-6)
+            gate_fields = (
+                (widgets[1], 'gate_voltage_range', 'gate_ilimit'),
+                (widgets[2], 'Gate_VOLT_RANGE', 'Gate_I_LIMIT'),
+                (widgets[3], 'gate_v_range', 'gate_i_limit'),
+                (widgets[4], 'g_voltage_range', 'g_ilimit'),
+                (widgets[5], 'g_voltage_range', 'g_ilimit'),
+                (widgets[6], 'g_voltage_range', 'g_ilimit'),
+            )
+            for widget, range_key, limit_key in gate_fields:
+                self.assertEqual(float(widget.inputs[range_key].text()), 20.0)
+                self.assertEqual(float(widget.inputs[limit_key].text()), 1e-9)
+                for obsolete in (
+                    'gate_leakage_limit', 'Ig_THRESHOLD',
+                    'ig_threshold', 'g_range',
+                ):
+                    self.assertNotIn(obsolete, widget.inputs)
             it_widget = widgets[4]
             window.resize(1600, 900)
             window.stack.setCurrentWidget(it_widget)
@@ -658,6 +729,22 @@ class GlobalInstrumentSelectionTests(unittest.TestCase):
             )
             self.assertNotIn(
                 'settle_time', value['modules']['iv_curve'], path.name
+            )
+            self.assertNotIn(
+                'gate_leakage_limit', value['modules']['iv_curve'], path.name
+            )
+            self.assertNotIn(
+                'gate_leakage_limit',
+                value['modules']['iv_curve']['__gate_settings__'], path.name
+            )
+            self.assertNotIn(
+                'Ig_THRESHOLD', value['modules']['isd_vg_setvsd'], path.name
+            )
+            self.assertNotIn(
+                'ig_threshold', value['modules']['mapping_scan'], path.name
+            )
+            self.assertNotIn(
+                'g_range', value['modules']['arbitrary_gate'], path.name
             )
 
 
@@ -768,6 +855,35 @@ class FastZeroingTests(unittest.TestCase):
             command.startswith(':SOUR:SWE:') for command in instrument.writes
         ))
 
+    def test_confirmed_emergency_shutdown_is_reported_as_safe(self):
+        event = threading.Event()
+        event.set()
+        instrument = FakeZeroInstrument(0.05)
+        report = fast_shutdown_zero_2450(
+            instrument, 0.001, force_event=event
+        )
+        self.assertTrue(shutdown_report_confirmed(report))
+
+        messages = queue.Queue()
+        worker = ArbMeasurement(
+            {'b_ramp_step': 0.001, 'gate_enabled': False},
+            messages, threading.Event(), event,
+        )
+        worker.bias_k = FakeZeroInstrument(0.05)
+        worker.safe_zeroing()
+        queued = []
+        while not messages.empty():
+            queued.append(messages.get_nowait())
+        self.assertTrue(any(
+            item[0] == 'log' and '已紧急归零并关闭输出' in item[1]
+            for item in queued
+        ))
+        self.assertFalse(any(
+            item[0] == 'log' and '安全归零失败' in item[1]
+            for item in queued
+        ))
+        self.assertIn(('ramp_b', 0.0, 0.0), queued)
+
     def test_cleanup_waits_are_not_truncated(self):
         worker = IsdVgMeasurement(
             {}, queue.Queue(), threading.Event(), threading.Event()
@@ -779,6 +895,69 @@ class FastZeroingTests(unittest.TestCase):
                 self.assertGreaterEqual(
                     time.monotonic() - started, duration * 0.95
                 )
+
+    def test_isdvg_finished_payload_keeps_formal_bias_after_zeroing(self):
+        bias = FakeInstrument({
+            '*IDN?': 'KEITHLEY INSTRUMENTS,MODEL 2450,BIAS,1',
+        })
+        gate = FakeInstrument({
+            '*IDN?': 'KEITHLEY INSTRUMENTS,MODEL 2450,GATE,1',
+        })
+
+        class ResourceManager:
+            def open_resource(self, address):
+                return bias if address.endswith('::1::INSTR') else gate
+
+            def close(self):
+                pass
+
+        preset = {
+            'BIAS_ADDR': 'GPIB0::1::INSTR',
+            'GATE_ADDR': 'GPIB0::2::INSTR',
+            'BIAS_TERM': 'REAR',
+            'GATE_TERM': 'REAR',
+            'Bias_target': 0.05,
+            'Bias_step': 0.05,
+            'Bias_RANGE': 1e-6,
+            'Bias_I_LIMIT': 1.05e-6,
+            'Bias_NPLC': 0.1,
+            'Bias_Delay': 0.0,
+            'Gate_VOLT_RANGE': 20.0,
+            'Gate_I_LIMIT': 1e-9,
+            'Vg_1st': 0.05,
+            'Vg_2nd': -0.05,
+            'Vg_step': 0.05,
+            'SETTLE_TIME': 0.0,
+        }
+        messages = queue.Queue()
+        worker = IsdVgMeasurement(
+            preset, messages, threading.Event(), threading.Event()
+        )
+
+        def read_value(instrument, _command, _label):
+            return 5e-8 if instrument is bias else 1e-12
+
+        with (
+            patch('modules.isd_vg_setvsd.pyvisa.ResourceManager',
+                  return_value=ResourceManager()),
+            patch('modules.isd_vg_setvsd.clear_scpi_status'),
+            patch('modules.isd_vg_setvsd.configure_current_autozero'),
+            patch('modules.isd_vg_setvsd.verify_current_configuration'),
+            patch('modules.isd_vg_setvsd.configure_gate_meter',
+                  return_value={}),
+            patch('modules.isd_vg_setvsd.required_float_query',
+                  side_effect=read_value),
+            patch('modules.isd_vg_setvsd.reliable_output_off',
+                  return_value=(True, [])),
+        ):
+            worker.run()
+
+        queued = []
+        while not messages.empty():
+            queued.append(messages.get_nowait())
+        finished = next(item for item in queued if item[0] == 'finished')
+        self.assertEqual(finished[1][4], 0.05)
+        self.assertTrue(finished[1][5])
 
     def test_it_intergroup_point_keeps_001_second_delay(self):
         instrument = FakeInstrument({
@@ -886,7 +1065,7 @@ class IVMultiGateTests(unittest.TestCase):
             'gate_ramp_step': 0.5,
             'gate_step_delay': 0.0,
             'gate_settle': 0.0,
-            'gate_leakage_limit': 1e-9,
+            'gate_ilimit': 1e-9,
         }
         params.update(changes)
         return params
@@ -1031,7 +1210,7 @@ class IVMultiGateTests(unittest.TestCase):
         worker.gate_keithley = FakeGateInstrument(currents=[2e-9])
         worker.actual_vg = 0.05
         worker._reset_cycle_data()
-        with self.assertRaises(GateLeakageError):
+        with self.assertRaises(GateCurrentLimitError):
             worker.measure_loop()
         snapshot = worker._cycle_snapshot()
         self.assertEqual(snapshot['counts'][0], 1)
@@ -1373,7 +1552,7 @@ class FileAndRawDataTests(unittest.TestCase):
             with atomic_text_writer(first) as stream:
                 stream.write('raw\n')
             second = allocate_unique_path(folder, 'result.txt')
-            self.assertEqual(second.name, 'result_001.txt')
+            self.assertEqual(second.name, 'result_backup001.txt')
             meta = write_result_metadata(
                 first,
                 status='partial',
@@ -1390,6 +1569,14 @@ class FileAndRawDataTests(unittest.TestCase):
             self.assertEqual(
                 payload['stopped_at_local'], '2026-07-24 12:34:56'
             )
+
+    def test_partial_backup_number_precedes_partial_marker(self):
+        with tempfile.TemporaryDirectory() as folder:
+            complete = allocate_unique_path(folder, 'result.txt')
+            with atomic_text_writer(complete) as stream:
+                stream.write('complete')
+            partial = allocate_unique_path(folder, 'result_partial.txt')
+            self.assertEqual(partial.name, 'result_backup001_partial.txt')
 
     def test_line_filter_refuses_out_of_band_fit_and_keeps_raw(self):
         times = np.arange(100, dtype=float) / 80.0
@@ -1798,7 +1985,7 @@ class ItBufferTests(unittest.TestCase):
 class MappingMonitorTests(unittest.TestCase):
     def test_missing_and_expired_gate_readings_stop_measurement(self):
         measurement = MappingMeasurement(
-            {'ig_threshold': 1e-9},
+            {'gate_i_limit': 1e-9},
             queue.Queue(),
             queue.Queue(),
             threading.Event(),
@@ -1814,7 +2001,7 @@ class MappingMonitorTests(unittest.TestCase):
     def test_monitor_thread_can_be_joined(self):
         stop_event = threading.Event()
         measurement = MappingMeasurement(
-            {'ig_threshold': 0.0},
+            {'gate_i_limit': 1e-9},
             queue.Queue(),
             queue.Queue(),
             stop_event,
@@ -1834,7 +2021,7 @@ class MappingMonitorTests(unittest.TestCase):
 
 
 class ArbitraryGateSamplingTests(unittest.TestCase):
-    def _worker(self, gate_response='2e-9', duration=0.01):
+    def _worker(self, gate_response='2e-10', duration=0.01):
         params = {
             'b_target': 0.1, 'b_ramp_step': 0.001,
             'b_step_delay': 0.0, 'b_settle': 0.0,
@@ -1842,6 +2029,7 @@ class ArbitraryGateSamplingTests(unittest.TestCase):
             'switch_settle': 0.0, 'cycles': 1, 'plot_interval': 2,
             'acquisition_mode': 'realtime', 'sample_nplc': 0.05,
             'gate_monitor_interval': 0.001, 'filename': 'gate.txt',
+            'g_ilimit': 1e-9,
         }
         worker = GateArbMeasurement(
             params, queue.Queue(), threading.Event(), threading.Event()
@@ -1894,7 +2082,7 @@ class ArbitraryGateSamplingTests(unittest.TestCase):
                     if instrument is worker.bias_k:
                         getattr(worker, event_name).set()
                         return 1e-6
-                    return 2e-9
+                    return 2e-10
 
                 with patch(
                     'core.time_acquisition.required_float_query',
@@ -1963,6 +2151,7 @@ class UnifiedTimeSamplingTests(unittest.TestCase):
             self.assertTrue(widget.inputs['duration'].isEnabled())
             for key in (
                 'g_ramp_step', 'g_ilimit', 'g_settle',
+                'g_voltage_range',
                 'g_post_zero_wait', 'b_ramp_step', 'b_range',
                 'b_ilimit', 'b_settle', 'b_post_wait',
             ):
@@ -1986,7 +2175,6 @@ class UnifiedTimeSamplingTests(unittest.TestCase):
                 (4, 'bias_range', 'bias_i_limit'),
                 (5, 'b_range', 'b_ilimit'),
                 (6, 'b_range', 'b_ilimit'),
-                (7, 'g_range', 'g_ilimit'),
                 (7, 'b_range', 'b_ilimit'),
             )
             for page, range_key, limit_key in pairs:
@@ -2001,6 +2189,89 @@ class UnifiedTimeSamplingTests(unittest.TestCase):
                 )
                 widget.inputs[limit_key].setText('0.0009')
                 self.assertEqual(widget.inputs[limit_key].text(), '0.0009')
+        finally:
+            window.close()
+
+    def test_bias_current_limit_is_immediately_below_its_range(self):
+        window = MainWindow()
+        try:
+            pairs = (
+                (2, 'current_range', 'i_limit'),
+                (3, 'Bias_RANGE', 'Bias_I_LIMIT'),
+                (4, 'bias_range', 'bias_i_limit'),
+                (5, 'b_range', 'b_ilimit'),
+                (6, 'b_range', 'b_ilimit'),
+                (7, 'b_range', 'b_ilimit'),
+            )
+            for page, range_key, limit_key in pairs:
+                widget = window.stack.widget(page)
+                range_control = widget.inputs[range_key]
+                limit_control = widget.inputs[limit_key]
+                layout = range_control.parentWidget().layout()
+                self.assertIs(layout, limit_control.parentWidget().layout())
+                range_row, range_col, _rs, _cs = layout.getItemPosition(
+                    layout.indexOf(range_control)
+                )
+                limit_row, limit_col, _rs, _cs = layout.getItemPosition(
+                    layout.indexOf(limit_control)
+                )
+                self.assertEqual(limit_col, range_col)
+                self.assertEqual(limit_row, range_row + 1)
+        finally:
+            window.close()
+
+    def test_gate_parameter_columns_are_contiguous_and_pixel_aligned(self):
+        window = MainWindow()
+        try:
+            window.resize(1600, 1000)
+            window.show()
+            iv = window.stack.widget(2)
+            it = window.stack.widget(5)
+            arbitrary_bias = window.stack.widget(6)
+            for widget in (iv, it, arbitrary_bias):
+                window.stack.setCurrentWidget(widget)
+                widget.cb_gate.setChecked(True)
+                QApplication.processEvents()
+                QApplication.processEvents()
+
+            iv_layout = iv.inputs['gate_voltage_range'].parentWidget().layout()
+            expected_iv_positions = {
+                'gate_voltage_range': (2, 1),
+                'gate_ilimit': (3, 1),
+                'gate_nplc': (4, 1),
+                'gate_ramp_step': (5, 1),
+                'gate_step_delay': (2, 3),
+                'gate_settle': (3, 3),
+                'gate_group_wait': (4, 3),
+            }
+            for key, expected in expected_iv_positions.items():
+                index = iv_layout.indexOf(iv.inputs[key])
+                row, column, _row_span, _column_span = (
+                    iv_layout.getItemPosition(index)
+                )
+                self.assertEqual((row, column), expected)
+
+            for target_key, reference_key in (
+                ('g_target_s', 'g_voltage_range'),
+                ('b_target_s', 'b_ramp_step'),
+            ):
+                target = it.inputs[target_key]
+                reference = it.inputs[reference_key]
+                self.assertEqual(target.x(), reference.x())
+                self.assertEqual(target.width(), reference.width())
+
+            aligned_pairs = (
+                (iv, 'gate_voltage_range', 'gate_step_delay'),
+                (window.stack.widget(3), 'Vg_1st', 'Gate_VOLT_RANGE'),
+                (window.stack.widget(4), 'vg_start', 'gate_v_range'),
+                (it, 'g_voltage_range', 'g_settle'),
+                (arbitrary_bias, 'g_target', 'g_voltage_range'),
+                (window.stack.widget(7), 'cycles', 'g_voltage_range'),
+            )
+            for widget, left_key, right_key in aligned_pairs:
+                left = widget.inputs[left_key]
+                right = widget.inputs[right_key]
+                self.assertEqual(left.width(), right.width())
         finally:
             window.close()
 
@@ -2111,7 +2382,7 @@ class ConfigurationSchemaTests(unittest.TestCase):
                 (config_dir / name).read_text(encoding='utf-8')
             )
             version, modules = parse_config_modules(payload)
-            self.assertEqual(version, 3)
+            self.assertEqual(version, 4)
             self.assertIn('it_step_setgate', modules)
             controls = modules['it_step_setgate']['__controls__']
             self.assertTrue(controls['rb_b_single'])
@@ -2122,7 +2393,7 @@ class ConfigurationSchemaTests(unittest.TestCase):
     def test_noncurrent_schemas_are_rejected(self):
         for payload in (
             {'__schema_version__': 2, 'modules': {}},
-            {'__schema_version__': 4, 'modules': {}},
+            {'__schema_version__': 3, 'modules': {}},
             {'iv_curve': {'v_start': '0', 'v_end': '1'}},
         ):
             with self.subTest(payload=payload):

@@ -39,11 +39,14 @@ from core.hardware_base import (
     allocate_unique_path,
     atomic_text_writer,
     assert_no_scpi_errors,
+    check_gate_current_limit,
     clear_scpi_status,
+    configure_gate_meter,
     configure_current_autozero,
     fast_shutdown_zero_2450,
     generate_exact_ramp_levels,
     reliable_output_off,
+    shutdown_report_confirmed,
     required_float_query,
     validate_2450_idn,
     validate_current_range_limit,
@@ -55,8 +58,10 @@ from core.hardware_base import (
     validate_step_divides_interval,
     validate_terminal,
     validate_voltage_range,
-    validate_voltage_within_range,
+    validate_gate_voltage_within_range,
     verify_current_configuration,
+    GateCurrentLimitError,
+    GATE_CURRENT_RANGE_A,
     write_result_metadata,
 )
 from core.instrument_config import InstrumentSettings
@@ -66,10 +71,6 @@ from core.ui_builder import (
     style_parameter_control, style_parameter_label, update_scroll_area_layout,
 )
 from core.utils import G0, _0, _1, _2, _3
-
-
-class GateLeakageError(RuntimeError):
-    pass
 
 
 def parse_custom_iv_values(text):
@@ -196,7 +197,6 @@ def default_iv_gate_settings():
         'gate_voltage_range': 20.0,
         'gate_nplc': 1.0,
         'gate_ilimit': 1e-9,
-        'gate_leakage_limit': 1e-9,
         'gate_ramp_step': 0.1,
         'gate_step_delay': 0.5,
         'gate_settle': 20.0,
@@ -254,7 +254,7 @@ def build_gate_targets(settings):
     )
     for index, target in enumerate(targets, 1):
         validate_source_voltage(target, f'第{index}个Vg')
-        validate_voltage_within_range(
+        validate_gate_voltage_within_range(
             target, voltage_range, f'第{index}个Vg'
         )
     return [float(value) for value in targets]
@@ -723,39 +723,18 @@ class IV_Measurement:
             validate_positive_step(
                 self.params['gate_ramp_step'], '栅压爬坡步长'
             )
-            validate_current_range_limit(
-                'AUTO', self.params['gate_ilimit'], '栅极'
-            )
+            check_gate_current_limit(0.0, self.params['gate_ilimit'])
             for index, target in enumerate(self.params['gate_targets'], 1):
-                validate_voltage_within_range(
+                validate_gate_voltage_within_range(
                     target, self.params['gate_voltage_range'],
                     f'第{index}个Vg',
                 )
-            g.write('*RST')
-            clear_scpi_status(g)
-            g.write(':ABORt')
-            g.write(':SOUR:FUNC VOLT')
-            g.write(':SENS:FUNC "CURR"')
-            g.write(':SENS:CURR:RSEN OFF')
-            g.write(f":ROUT:TERM {self.params['gate_terminal']}")
-            g.write(':SENS:CURR:AVER OFF')
-            g.write(':SOUR:VOLT:READ:BACK ON')
-            g.write(f":SENS:CURR:NPLC {self.params['gate_nplc']}")
-            configure_current_autozero(g, 'continuous')
-            g.write(':SENS:CURR:RANG:AUTO ON')
-            g.write(f":SOUR:VOLT:ILIM {self.params['gate_ilimit']}")
-            g.write(
-                f":SOUR:VOLT:RANG {self.params['gate_voltage_range']}"
-            )
-            g.write(':SOUR:VOLT 0')
-            time.sleep(0.05)
-            verify_current_configuration(
+            configure_gate_meter(
                 g,
+                voltage_range=self.params['gate_voltage_range'],
                 nplc=self.params['gate_nplc'],
-                current_range='AUTO',
                 current_limit=self.params['gate_ilimit'],
                 terminal=self.params['gate_terminal'],
-                autozero_mode='continuous',
                 label='IV栅表',
             )
         if self.gate_keithley is not None:
@@ -771,11 +750,8 @@ class IV_Measurement:
     def safe_ramp_to_zero(self, turn_off=True, fast=False):
         if self.keithley is None:
             return
-        if self.force_stop_event.is_set():
-            reliable_output_off(self.keithley, 'IV源表')
-            return
         step_abs = abs(self.params['v_step'])
-        if fast:
+        if fast or self.force_stop_event.is_set():
             self.update_queue.put(('stage', '安全归零中...'))
             report = fast_shutdown_zero_2450(
                 self.keithley,
@@ -783,10 +759,13 @@ class IV_Measurement:
                 label='IV源表',
                 force_event=self.force_stop_event,
             )
-            if report['status'] == 'complete':
-                self.alarm_queue.put(
-                    f"归零完成，用时 {report['elapsed_s']:.1f} s"
+            if shutdown_report_confirmed(report):
+                message = (
+                    '强制终止：已紧急归零并关闭输出'
+                    if report['status'] == 'emergency_off'
+                    else f"归零完成，用时 {report['elapsed_s']:.1f} s"
                 )
+                self.alarm_queue.put(message)
                 self.alarm_queue.put('输出已关闭')
             else:
                 self.alarm_queue.put(
@@ -809,11 +788,7 @@ class IV_Measurement:
         return current
 
     def _check_gate_current(self, current):
-        if abs(current) > self.params['gate_leakage_limit']:
-            raise GateLeakageError(
-                f'栅电流超过保护阈值：{current:.6e} A > '
-                f'{self.params["gate_leakage_limit"]:.6e} A'
-            )
+        check_gate_current_limit(current, self.params['gate_ilimit'])
 
     def _ramp_gate(self, target):
         current = required_float_query(
@@ -934,7 +909,7 @@ class IV_Measurement:
                         self.update_queue.put((seg_idx, v, curr))
                     if gate_error is not None:
                         raise gate_error
-                except GateLeakageError as exc:
+                except GateCurrentLimitError as exc:
                     self.alarm_queue.put(f"栅电流保护触发: {exc}")
                     raise
                 except Exception as exc:
@@ -1072,14 +1047,20 @@ class IV_Measurement:
                         if report is not None
                     ]
                     if reports and all(
-                        report['status'] == 'complete'
+                        shutdown_report_confirmed(report)
                         for report in reports
                     ):
                         elapsed = sum(
                             report['elapsed_s'] for report in reports
                         )
+                        emergency = any(
+                            report['status'] == 'emergency_off'
+                            for report in reports
+                        )
                         self.alarm_queue.put(
-                            f'归零完成，用时 {elapsed:.1f} s'
+                            '强制终止：已紧急归零并关闭输出'
+                            if emergency
+                            else f'归零完成，用时 {elapsed:.1f} s'
                         )
                         self.alarm_queue.put('输出已关闭')
                     elif reports:
@@ -1275,31 +1256,27 @@ class IVWidget(BaseAppWidget):
             'gate_voltage_range', defaults['gate_voltage_range']
         )
         add_gate_parameter(
-            2, 2, '测量 NPLC:',
-            'gate_nplc', defaults['gate_nplc']
-        )
-        add_gate_parameter(
             3, 0, '电流限制 (A):',
             'gate_ilimit', defaults['gate_ilimit']
         )
         add_gate_parameter(
-            3, 2, '栅电流保护阈值 (A):',
-            'gate_leakage_limit', defaults['gate_leakage_limit']
+            4, 0, '测量 NPLC:',
+            'gate_nplc', defaults['gate_nplc']
         )
         add_gate_parameter(
-            4, 0, '爬坡/归零步长 (V):',
+            5, 0, '爬坡/归零步长 (V):',
             'gate_ramp_step', defaults['gate_ramp_step']
         )
         add_gate_parameter(
-            4, 2, '栅压单步延时 (s):',
+            2, 2, '栅压单步延时 (s):',
             'gate_step_delay', defaults['gate_step_delay']
         )
         add_gate_parameter(
-            5, 0, '栅压到位等待 (s):',
+            3, 2, '栅压到位等待 (s):',
             'gate_settle', defaults['gate_settle']
         )
         add_gate_parameter(
-            5, 2, '栅压组间等待 (s):',
+            4, 2, '栅压组间等待 (s):',
             'gate_group_wait', defaults['gate_group_wait']
         )
         scroll_content_layout.addWidget(self.gate_group)
@@ -1348,7 +1325,7 @@ class IVWidget(BaseAppWidget):
         for label in (self.lbl_v_start, self.lbl_v_end, self.lbl_v_step):
             style_parameter_label(label, self.ui_font)
         for key, default in (
-            ('v_start', '-1.0'), ('v_end', '1.0'), ('v_step', '0.02')
+            ('v_start', '0.02'), ('v_end', '-0.02'), ('v_step', '0.001')
         ):
             self.inputs[key] = QLineEdit(default)
             style_parameter_control(self.inputs[key], self.ui_font)
@@ -1396,9 +1373,9 @@ class IVWidget(BaseAppWidget):
         common_grid.setContentsMargins(12, 18, 12, 12)
         align_parameter_grid(common_grid)
         common_items = (
-            ('电流限制 (A):', 'i_limit', '1.05e-6', 0, 0),
+            ('电流量程 (A):', 'current_range', '1e-6', 0, 0),
             ('测量 NPLC:', 'nplc', '1.0', 0, 2),
-            ('电流量程 (A):', 'current_range', '1e-6', 1, 0),
+            ('电流限制 (A):', 'i_limit', '1.05e-6', 1, 0),
             ('循环次数:', 'cycles', '1', 1, 2),
         )
         for text, key, default, row, column in common_items:
@@ -1589,7 +1566,7 @@ class IVWidget(BaseAppWidget):
         settings.pop('gate_terminal', None)
         for key in (
             'gate_voltage_range', 'gate_nplc', 'gate_ilimit',
-            'gate_leakage_limit', 'gate_ramp_step', 'gate_step_delay',
+            'gate_ramp_step', 'gate_step_delay',
             'gate_settle', 'gate_group_wait',
         ):
             settings[key] = float(self.inputs[key].text().strip())
@@ -1600,7 +1577,7 @@ class IVWidget(BaseAppWidget):
         settings.update(self.gate_settings)
         for key in (
             'gate_voltage_range', 'gate_nplc', 'gate_ilimit',
-            'gate_leakage_limit', 'gate_ramp_step', 'gate_step_delay',
+            'gate_ramp_step', 'gate_step_delay',
             'gate_settle', 'gate_group_wait',
         ):
             self.inputs[key].setText(str(settings[key]))
@@ -1724,11 +1701,7 @@ class IVWidget(BaseAppWidget):
                 validate_positive_step(
                     gate['gate_ramp_step'], '栅压爬坡步长'
                 )
-                validate_current_range_limit(
-                    'AUTO', gate['gate_ilimit'], '栅极'
-                )
-                if gate['gate_leakage_limit'] <= 0:
-                    raise ValueError('栅电流保护阈值必须大于0')
+                check_gate_current_limit(0.0, gate['gate_ilimit'])
                 for key, label in (
                     ('gate_step_delay', '栅压单步等待'),
                     ('gate_settle', '栅压到位等待'),
@@ -2063,8 +2036,10 @@ class IVWidget(BaseAppWidget):
                     ),
                     'gate_nplc': gate_metadata.get('gate_nplc'),
                     'gate_ilimit': gate_metadata.get('gate_ilimit'),
-                    'gate_leakage_limit': gate_metadata.get(
-                        'gate_leakage_limit'
+                    'gate_current_range_A': GATE_CURRENT_RANGE_A,
+                    'gate_software_monitoring': True,
+                    'gate_current_limit_tripped': status != 'complete' and (
+                        error is not None and '栅电流' in str(error)
                     ),
                     'gate_ramp_step': gate_metadata.get('gate_ramp_step'),
                     'gate_step_delay': gate_metadata.get('gate_step_delay'),
