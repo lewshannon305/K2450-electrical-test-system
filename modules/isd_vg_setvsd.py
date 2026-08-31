@@ -850,6 +850,7 @@ class IsdVgSetVsdWidget(BaseAppWidget):
 
     def stop_measurement(self):
         self.stop_event.set()
+        self.note_result_status('partial', '用户停止')
         self.stop_btn.setEnabled(False)
         self.stop_btn.setText('归零中...')
         self.log_info('已触发停止，正在步进安全归零...')
@@ -968,6 +969,16 @@ class IsdVgSetVsdWidget(BaseAppWidget):
                 )
                 self.show_final_status(
                     result_status, None if scan_completed else reason
+                )
+                terminal_logs = {
+                    'user': '用户停止：安全归零流程已结束。',
+                    'force': '强制终止：紧急关断流程已结束。',
+                    'threshold': '保护触发：安全归零流程已结束。',
+                    'error': '测量异常结束，已执行输出关闭流程。',
+                }
+                self.log_info(
+                    '测量完成。' if scan_completed
+                    else terminal_logs.get(reason, '测量流程已结束。')
                 )
 
                 if all_vg:

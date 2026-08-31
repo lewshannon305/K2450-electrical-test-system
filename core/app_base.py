@@ -130,13 +130,13 @@ class BaseAppWidget(QWidget):
             and hasattr(force_event, 'is_set')
             and force_event.is_set()
         )
-        if status == 'complete':
-            text = '测试完成'
-        elif force_requested or (
+        if force_requested or (
             any(token in detail for token in ('force', '强制'))
             and not any(token in detail for token in ('user', '用户停止'))
         ):
             text = '强制终止'
+        elif status == 'complete':
+            text = '测试完成'
         elif any(token in detail for token in ('threshold', '保护', '漏电')):
             text = '保护触发，测试已停止'
         elif any(token in detail for token in ('user', '用户停止')):

@@ -53,7 +53,7 @@ from modules.it_step_setgate import (
     build_it_voltage_targets,
     parse_it_voltage_sequence,
 )
-from modules.isd_vg_setvsd import IsdVgMeasurement
+from modules.isd_vg_setvsd import IsdVgMeasurement, IsdVgSetVsdWidget
 from modules.iv_curve import (
     IV_Measurement,
     IVWidget,
@@ -2512,6 +2512,38 @@ class StatusDisplayTests(unittest.TestCase):
         display.force_stop_event.set()
         display.show_final_status()
         self.assertEqual(display.status_labels['stage'].text(), '强制终止')
+
+    def test_force_request_overrides_stale_complete_result(self):
+        display = self.Harness()
+        display.force_stop_event.set()
+        display.show_final_status('complete')
+        self.assertEqual(display.status_labels['stage'].text(), '强制终止')
+
+    def test_isdvg_user_stop_writes_terminal_log(self):
+        app = QApplication.instance() or QApplication([])
+        widget = IsdVgSetVsdWidget()
+        terminal_logs = []
+        try:
+            widget._begin_result_run()
+            widget.measure_running = True
+            with patch.object(widget, 'log_info', side_effect=terminal_logs.append):
+                widget.stop_measurement()
+                widget.update_queue.put((
+                    'finished', ([], [], [], [], 0.02, False, 'user')
+                ))
+                widget.poll_queue()
+
+            self.assertEqual(
+                widget.status_labels['stage'].text(), '用户停止'
+            )
+            self.assertEqual(
+                terminal_logs[-1], '用户停止：安全归零流程已结束。'
+            )
+        finally:
+            widget.timer_poll.stop()
+            widget.timer_plot.stop()
+            widget.close()
+            app.processEvents()
 
     def test_failure_message_cannot_finish_as_success(self):
         display = self.Harness()

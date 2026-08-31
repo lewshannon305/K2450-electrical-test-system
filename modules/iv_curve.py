@@ -1814,6 +1814,7 @@ class IVWidget(BaseAppWidget):
 
         self.force_stop_event.set()
         self.stop_event.set()
+        self.note_result_status('partial', '强制终止')
         self.force_stop_btn.setEnabled(False)
         self.force_stop_btn.setText("强制终止中...")
         self.stop_btn.setEnabled(False)

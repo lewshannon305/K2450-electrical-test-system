@@ -1128,6 +1128,7 @@ class ArbitraryBiasWidget(BaseAppWidget):
             return
         self.force_stop_event.set()
         self.stop_event.set()
+        self.note_result_status('partial', '强制终止')
         self.btn_force.setEnabled(False)
         self.btn_force.setText("强行切断中...")
         self.btn_stop.setEnabled(False)
